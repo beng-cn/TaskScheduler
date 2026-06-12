@@ -1,0 +1,30 @@
+# TaskScheduler Docker Compose 配置
+# 启动方式: docker-compose up -d
+# 查看日志: docker-compose logs -f
+# 停止: docker-compose down
+
+version: "3.8"
+
+services:
+  scheduler:
+    build: .
+    container_name: task-scheduler
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - GIN_MODE=release
+    # 如果需要使用 Redis（可选扩展）:
+    # depends_on:
+    #   - redis
+    # environment:
+    #   - STORE_TYPE=redis
+    #   - REDIS_ADDR=redis:6379
+
+  # Redis（可选：用于分布式锁和任务缓存）
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: task-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"

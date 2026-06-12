@@ -1,0 +1,30 @@
+# 编译产物
+/bin/
+*.exe
+*.test
+*.out
+
+# 日志文件
+/logs/
+
+# 配置文件（含数据库密码）
+config.json
+config_redis.json
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 依赖
+vendor/
+
+# 临时文件
+tmp/
+temp/

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskScheduler API 文档</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+    <style>
+        html { box-sizing: border-box; overflow-y: scroll; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin: 0; background: #fafafa; }
+        .topbar { display: none; }
+        /* 任务监控浮窗 */
+        .task-monitor {
+            position: fixed;
+            bottom: 0;
+            right: 0;
+            width: 360px;
+            max-height: 400px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px 0 0 0;
+            box-shadow: -4px -4px 16px rgba(0,0,0,0.5);
+            z-index: 1000;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transition: max-height 0.3s;
+        }
+        .task-monitor.collapsed { max-height: 36px; }
+        .task-monitor-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 14px;
+            background: #1c2128;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            color: #58a6ff;
+            border-bottom: 1px solid #30363d;
+        }
+        .task-monitor-header .arrow { transition: transform 0.2s; }
+        .task-monitor.collapsed .arrow { transform: rotate(-90deg); }
+        .task-monitor-body { padding: 8px; overflow-y: auto; flex: 1; max-height: 320px; }
+        .task-monitor-body::-webkit-scrollbar { width: 5px; }
+        .task-monitor-body::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+        .task-monitor-body::-webkit-scrollbar-track { background: #0d1117; }
+        .task-monitor .task-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 3px 8px;
+            margin: 1px 0;
+            border-radius: 3px;
+            font-size: 11px;
+            background: #0d1117;
+            border: 1px solid #21262d;
+        }
+        .task-monitor .task-item:hover { border-color: #58a6ff; }
+        .task-monitor .task-item code { flex: 1; color: #8b949e; }
+        .task-monitor .task-status {
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            margin: 0 6px;
+        }
+        .task-monitor .status-pending  { background:#1c2a3a; color:#58a6ff; }
+        .task-monitor .status-running  { background:#2a1c00; color:#db6d28; }
+        .task-monitor .status-done     { background:#0f2918; color:#3fb950; }
+        .task-monitor .status-failed   { background:#2a0c0c; color:#f85149; }
+        .task-monitor .status-retrying { background:#2a1c00; color:#d2991d; }
+        .task-monitor .task-link {
+            color: #58a6ff;
+            text-decoration: none;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .task-monitor .task-link:hover { text-decoration: underline; }
+        .task-monitor .empty-hint { text-align:center; color:#8b949e; font-size:12px; padding:20px; }
+
+        /* 成功通知 Toast */
+        .swagger-toast {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            background: #0f2918;
+            border: 1px solid #3fb950;
+            border-radius: 8px;
+            padding: 14px 20px;
+            z-index: 2000;
+            font-size: 13px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            animation: slideIn 0.3s ease;
+            max-width: 420px;
+        }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .swagger-toast .toast-title { color: #3fb950; font-weight: 600; margin-bottom: 4px; }
+        .swagger-toast .toast-body { color: #c9d1d9; }
+        .swagger-toast .toast-link { color: #58a6ff; text-decoration: none; font-weight: 600; }
+        .swagger-toast .toast-link:hover { text-decoration: underline; }
+        .swagger-toast .toast-close {
+            position: absolute;
+            top: 4px;
+            right: 8px;
+            background: none;
+            border: none;
+            color: #8b949e;
+            cursor: pointer;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+
+    <!-- 任务监控浮窗——桥接 Swagger 和 Dashboard -->
+    <div class="task-monitor collapsed" id="taskMonitor">
+        <div class="task-monitor-header" onclick="toggleMonitor()">
+            <span>📋 最近任务 <span style="font-weight:normal;color:#8b949e;font-size:11px;">（实时同步 Dashboard）</span></span>
+            <span class="arrow">▼</span>
+        </div>
+        <div class="task-monitor-body" id="taskMonitorBody">
+            <div class="empty-hint">加载中...</div>
+        </div>
+    </div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+    <script>
+        // Swagger UI 中文汉化插件
+        var ChinesePlugin = function() {
+            // 中英文对照表
+            var map = {
+                // 按钮
+                'Try it out': '执行请求',
+                'Cancel': '取消',
+                'Execute': '发送',
+                'Clear': '清除',
+                'Close': '关闭',
+                'Authorize': '设置认证',
+                'Logout': '退出登录',
+                'Download': '下载',
+                'Copy': '复制',
+
+                // 区块标题
+                'Parameters': '请求参数',
+                'No parameters': '无参数',
+                'Request body': '请求体',
+                'Responses': '响应结果',
+                'Response': '响应',
+                'Server': '服务器',
+                'Servers': '服务器',
+                'Schemas': '数据模型',
+                'Schema': '数据模型',
+                'Example Value': '示例值',
+                'Media type': '请求格式',
+
+                // 参数相关
+                'Send empty value': '发送空值',
+                'Send API Request': '发送 API 请求',
+                'Deprecated': '已废弃',
+                'Required': '必填',
+                'string': '字符串',
+                'integer': '整数',
+                'boolean': '布尔值',
+                'array': '数组',
+                'object': '对象',
+                'number': '数字',
+
+                // 响应相关
+                'Code': '状态码',
+                'Description': '说明',
+                'Links': '链接',
+                'No links': '无链接',
+                'Response body': '响应体',
+                'Curl': 'Curl命令',
+                'Request URL': '请求地址',
+                'Server response': '服务器响应',
+
+                // 其他
+                'available': '可用',
+                'Authorizations': '认证方式',
+                'apiKey': 'API密钥',
+                'Value': '值',
+                'Default': '默认',
+                'Select a server': '选择服务器',
+                'Show/Hide': '展开/收起',
+                'Hide': '收起',
+                'Expand': '展开',
+                'Collapse': '收起所有',
+                'Expand all': '展开所有',
+                'Response headers': '响应头',
+                'Request headers': '请求头',
+                'Loading...': '加载中...',
+                'No content': '无内容',
+                'Array': '数组 [',
+            };
+
+            return {
+                wrapComponents: {
+                    // 拦截所有带文本的组件
+                    InfoContainer: function(Original) { return Original; },
+                },
+                afterLoad: function(ui) {
+                    // 用 MutationObserver 监听 DOM 变化并替换英文文本
+                    var target = document.getElementById('swagger-ui');
+                    if (!target) return;
+
+                    var replaceText = function(node) {
+                        if (node.nodeType === 3) { // 文本节点
+                            var text = node.textContent.trim();
+                            if (text && map[text]) {
+                                node.textContent = node.textContent.replace(text, map[text]);
+                            }
+                        } else if (node.nodeType === 1) { // 元素节点
+                            // 替换按钮文本（button 内可能有 span）
+                            if (node.tagName === 'BUTTON') {
+                                for (var k in map) {
+                                    if (node.textContent.trim() === k) {
+                                        // 找到文本子节点替换
+                                        var walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+                                        var tn;
+                                        while (tn = walker.nextNode()) {
+                                            if (tn.textContent.trim() === k) {
+                                                tn.textContent = tn.textContent.replace(k, map[k]);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // 替换 placeholder
+                            if (node.getAttribute && node.getAttribute('placeholder')) {
+                                var ph = node.getAttribute('placeholder');
+                                if (map[ph]) node.setAttribute('placeholder', map[ph]);
+                            }
+                            for (var i = 0; i < node.childNodes.length; i++) {
+                                replaceText(node.childNodes[i]);
+                            }
+                        }
+                    };
+
+                    // 初始替换
+                    setTimeout(function() { replaceText(target); }, 500);
+                    // 后续变化
+                    var observer = new MutationObserver(function() {
+                        replaceText(target);
+                    });
+                    observer.observe(target, { childList: true, subtree: true, characterData: true });
+                }
+            };
+        };
+
+        window.onload = function() {
+            var ui = SwaggerUIBundle({
+                url: "/docs/swagger.json",
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+                plugins: [ChinesePlugin],
+                layout: "StandaloneLayout",
+                defaultModelsExpandDepth: 1,
+                defaultModelExpandDepth: 1,
+                docExpansion: "list",
+                displayRequestDuration: true,
+                filter: true,
+                showExtensions: true,
+                showCommonExtensions: true,
+                responseInterceptor: function(res) {
+                    // 检测是否成功创建了任务
+                    if (res.url.indexOf('/api/tasks') !== -1 && res.status === 201 && res.body) {
+                        try {
+                            var data = JSON.parse(res.body);
+                            if (data.task && data.task.id) {
+                                showTaskCreatedToast(data.task);
+                            }
+                        } catch(e) {}
+                    }
+                    return res;
+                }
+            });
+
+            // 自动授权 API Key，打开页面即可直接调用 API
+            setTimeout(function() {
+                if (ui && ui.preauthorizeApiKey) {
+                    ui.preauthorizeApiKey('ApiKeyAuth', 'demo-secret-key');
+                }
+            }, 2000);
+        };
+
+        // --- 任务监控面板 ---
+        function toggleMonitor() {
+            document.getElementById('taskMonitor').classList.toggle('collapsed');
+        }
+
+        // 创建任务成功后弹出通知，点击可直接跳转 Dashboard
+        function showTaskCreatedToast(task) {
+            var statusMap = {pending:'等待中',running:'执行中',done:'已完成',failed:'已失败',timeout:'超时',retrying:'重试中'};
+            var toast = document.createElement('div');
+            toast.className = 'swagger-toast';
+            toast.innerHTML =
+                '<button class="toast-close" onclick="this.parentElement.remove()">x</button>' +
+                '<div class="toast-title">任务已创建</div>' +
+                '<div class="toast-body">' +
+                '<code>' + task.id + '</code> &nbsp;' +
+                '<span style="color:#d2991d">' + (statusMap[task.status] || task.status) + '</span>' +
+                ' &nbsp; <a class="toast-link" href="/?task=' + task.id + '" target="_blank">在控制台查看→</a>' +
+                '</div>';
+            document.body.appendChild(toast);
+            // 自动展开浮窗
+            var monitor = document.getElementById('taskMonitor');
+            if (monitor) monitor.classList.remove('collapsed');
+            // 立即刷新浮窗列表
+            fetchRecentTasks();
+            // 5秒后自动消失
+            setTimeout(function() { if (toast.parentElement) toast.remove(); }, 5000);
+        }
+
+        function fetchRecentTasks() {
+            fetch('/api/tasks')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var tasks = (data.tasks || []).slice(-30).reverse(); // 最近30个，自动出现滚动条
+                    var body = document.getElementById('taskMonitorBody');
+                    if (tasks.length === 0) {
+                        body.innerHTML = '<div class="empty-hint">暂无任务，在 Swagger 中创建任务后会出现在这里</div>';
+                        return;
+                    }
+                    var statusMap = {pending:'等待中',running:'执行中',done:'已完成',failed:'已失败',timeout:'超时',retrying:'重试中'};
+                    body.innerHTML = tasks.map(function(t) {
+                        return '<div class="task-item">' +
+                            '<code style="font-size:11px;margin-right:8px;">' + t.id + '</code>' +
+                            '<span class="task-status status-' + t.status + '">' + (statusMap[t.status] || t.status) + '</span>' +
+                            '<a class="task-link" href="/?task=' + t.id + '" target="_blank" title="在控制台查看详情">查看→</a>' +
+                        '</div>';
+                    }).join('');
+                })
+                .catch(function(e) { console.error(e); });
+        }
+
+        function esc(s) {
+            var el = document.createElement('div');
+            el.textContent = s || '';
+            return el.innerHTML;
+        }
+
+        fetchRecentTasks();
+        setInterval(fetchRecentTasks, 2000); // 每2秒同步 Dashboard
+    </script>
+</body>
+</html>

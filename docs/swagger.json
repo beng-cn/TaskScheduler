@@ -1,0 +1,171 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "TaskScheduler API",
+    "version": "1.0.0",
+    "description": "电商系统主动式监控调度平台 — 创建任务、监控执行、查看子步骤、接收飞书告警。\n\n认证方式: 在请求头中携带 `X-API-Key: demo-secret-key`",
+    "contact": { "name": "Demo" }
+  },
+  "servers": [
+    { "url": "http://localhost:8888", "description": "本地开发" }
+  ],
+  "security": [
+    { "ApiKeyAuth": [] }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API 密钥，默认值: demo-secret-key"
+      }
+    },
+    "schemas": {
+      "Task": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "task-1" },
+          "name": { "type": "string", "example": "电商健康检查" },
+          "type": { "type": "string", "enum": ["http_call", "data_clean", "flash_warmup", "cart_flow", "flash_full_check"], "example": "http_call" },
+          "payload": { "type": "string", "example": "{\"url\":\"http://localhost:8080/health\",\"method\":\"GET\"}" },
+          "status": { "type": "string", "enum": ["pending", "running", "done", "failed", "timeout", "retrying"], "example": "done" },
+          "priority": { "type": "integer", "example": 0, "description": "越大越优先" },
+          "retries": { "type": "integer", "example": 0 },
+          "max_retries": { "type": "integer", "example": 2 },
+          "timeout": { "type": "integer", "example": 10, "description": "超时秒数" },
+          "repeat_sec": { "type": "integer", "example": 60, "description": "循环间隔秒数，0 表示不循环" },
+          "scheduled_at": { "type": "string", "format": "date-time" },
+          "started_at": { "type": "string", "format": "date-time", "nullable": true },
+          "finished_at": { "type": "string", "format": "date-time", "nullable": true },
+          "result": { "type": "string" },
+          "error": { "type": "string" },
+          "steps": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/TaskStep" }
+          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TaskStep": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "example": "HTTP 用户登录" },
+          "status": { "type": "string", "enum": ["done", "failed", "skipped"], "example": "done" },
+          "duration_ms": { "type": "integer", "example": 69 },
+          "result": { "type": "string", "example": "Token 已获取" },
+          "error": { "type": "string" }
+        }
+      },
+      "CreateTaskRequest": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string", "example": "健康检查" },
+          "type": { "type": "string", "example": "http_call", "description": "任务类型" },
+          "payload": { "type": "string", "example": "{\"url\":\"http://localhost:8080/health\",\"method\":\"GET\"}" },
+          "priority": { "type": "integer", "example": 10 },
+          "max_retries": { "type": "integer", "example": 3 },
+          "timeout": { "type": "integer", "example": 10 },
+          "delay": { "type": "integer", "example": 5, "description": "延迟执行秒数" }
+        }
+      },
+      "Stats": {
+        "type": "object",
+        "properties": {
+          "dispatched": { "type": "integer", "example": 42 },
+          "running": { "type": "integer", "example": 3 },
+          "pool": { "$ref": "#/components/schemas/PoolStats" }
+        }
+      },
+      "PoolStats": {
+        "type": "object",
+        "properties": {
+          "workers": { "type": "integer" },
+          "queue_len": { "type": "integer" },
+          "queue_cap": { "type": "integer" },
+          "running": { "type": "integer" },
+          "completed": { "type": "integer" },
+          "failed": { "type": "integer" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": ["系统(System)"],
+        "summary": "检查服务是否正常运行，无需鉴权",
+        "security": [],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "type": "string" }, "stats": { "$ref": "#/components/schemas/Stats" } } } } } }
+        }
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "tags": ["系统(System)"],
+        "summary": "系统运行统计（累计分发/运行中/已完成/已失败/队列长度）",
+        "responses": {
+          "200": { "description": "统计信息", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Stats" } } } }
+        }
+      }
+    },
+    "/api/task-types": {
+      "get": {
+        "tags": ["系统(System)"],
+        "summary": "返回当前支持的所有任务类型",
+        "security": [],
+        "responses": {
+          "200": { "description": "任务类型列表", "content": { "application/json": { "schema": { "type": "object", "properties": { "types": { "type": "array", "items": { "type": "string" } } } } } } }
+        }
+      }
+    },
+    "/api/tasks": {
+      "get": {
+        "tags": ["任务(Tasks)"],
+        "summary": "列出所有任务，包含子步骤追踪数据",
+        "responses": {
+          "200": { "description": "任务列表", "content": { "application/json": { "schema": { "type": "object", "properties": { "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } }, "total": { "type": "integer" } } } } } }
+        }
+      },
+      "post": {
+        "tags": ["任务(Tasks)"],
+        "summary": "创建新任务，支持延迟/循环/优先级/重试",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateTaskRequest" } } }
+        },
+        "responses": {
+          "201": { "description": "创建成功" },
+          "400": { "description": "参数校验失败或任务类型不支持" }
+        }
+      }
+    },
+    "/api/tasks/{id}": {
+      "get": {
+        "tags": ["任务(Tasks)"],
+        "summary": "获取单个任务详情，含完整子步骤数据",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "task-1" }
+        ],
+        "responses": {
+          "200": { "description": "任务详情", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } } },
+          "404": { "description": "任务不存在" }
+        }
+      },
+      "delete": {
+        "tags": ["任务(Tasks)"],
+        "summary": "删除指定任务",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "删除成功" },
+          "404": { "description": "任务不存在" }
+        }
+      }
+    }
+  }
+}
