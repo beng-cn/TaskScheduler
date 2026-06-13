@@ -418,6 +418,8 @@
                 expandedTaskId = null;
                 return;
             }
+            // 缓存任务数据（供复制诊断报告用）
+            tasks.forEach(function(t) { taskCache[t.id] = t; });
             // 按任务 ID 排序（task-1, task-2... 位置固定不变）
             tasks.sort((a, b) => {
                 const na = parseInt(a.id.split('-')[1]) || 0;
@@ -526,9 +528,16 @@
                             <div class="f-value">${formatTime(t.finished_at)}</div>
                         </div>
                     </div>
+                    <div style="margin-top:12px;display:flex;gap:8px;">
+                        <button class="btn" style="font-size:12px;padding:4px 12px;" onclick="event.stopPropagation();copyDiagnosis('${t.id}')">📋 复制诊断报告</button>
+                        <a class="btn" style="font-size:12px;padding:4px 12px;text-decoration:none;" href="/api/error-log" target="_blank">📂 查看错误日志</a>
+                    </div>
                 </div>
             `;
         }
+
+        // 全局任务缓存（用于复制诊断报告）
+        var taskCache = {};
 
         function buildLifecycle(t) {
             // 根据实际状态确定每个阶段的样式
@@ -669,6 +678,58 @@
         }
 
         function openModal() { document.getElementById('createModal').classList.add('active'); }
+        function copyDiagnosis(id) {
+            var t = taskCache[id];
+            if (!t) { alert('任务数据未加载'); return; }
+            var statusMap = {pending:'等待中',running:'执行中',done:'已完成',failed:'已失败',timeout:'超时',retrying:'重试中'};
+            var report = [
+                '## 任务诊断报告',
+                '',
+                '| 字段 | 值 |',
+                '|---|---|',
+                '| 任务ID | ' + t.id + ' |',
+                '| 任务名称 | ' + t.name + ' |',
+                '| 任务类型 | ' + t.type + ' |',
+                '| 当前状态 | ' + (statusMap[t.status] || t.status) + ' |',
+                '| 重试次数 | ' + (t.retries||0) + '/' + (t.max_retries||0) + ' |',
+                '| 创建时间 | ' + formatTime(t.created_at) + ' |',
+                '| 开始时间 | ' + formatTime(t.started_at) + ' |',
+                '| 完成时间 | ' + formatTime(t.finished_at) + ' |',
+                t.error ? '| 错误信息 | `' + t.error + '` |' : '',
+                t.result ? '| 执行结果 | ' + t.result.substring(0,200) + ' |' : '',
+                '',
+                '### Payload',
+                '```json',
+                fmtPayload(t.payload),
+                '```',
+            ];
+            if (t.steps && t.steps.length > 0) {
+                report.push('', '### 子步骤详情', '');
+                report.push('| 状态 | 步骤 | 耗时 | 结果 |');
+                report.push('|---|---|---|---|');
+                t.steps.forEach(function(s) {
+                    var icon = s.status === 'done' ? '✅' : s.status === 'failed' ? '❌' : '⏭';
+                    report.push('| ' + icon + ' | ' + s.name + ' | ' + (s.duration_ms||'?') + 'ms | ' + (s.error || s.result || '-') + ' |');
+                });
+            }
+            // 定位提示：帮助 AI 快速找到对应代码
+            report.push('', '### 定位信息', '');
+            report.push('- 调度系统路径: `D:\\DEMO`');
+            report.push('- Runner 代码: `worker/runner.go` → `' + t.type + 'Runner` 函数');
+            report.push('- 错误日志: `logs/error.log`（JSON 行格式）');
+            report.push('- 存储后端: MySQL `task_scheduler.tasks` 表');
+            if (t.type === 'flash_warmup') report.push('- 涉及系统: 电商系统 `http://localhost:8080`，管理员 `admin/CHANGE_ME`');
+            if (t.type === 'cart_flow') report.push('- 涉及系统: 电商系统 `http://localhost:8080`，购物车+MySQL验证');
+            if (t.type === 'http_call') report.push('- 纯 HTTP 请求，检查目标 URL 是否可达');
+
+            var text = report.join('\n');
+            navigator.clipboard.writeText(text).then(function() {
+                alert('诊断报告已复制到剪贴板，可直接粘贴给 AI 分析');
+            }).catch(function() {
+                prompt('手动复制以下报告（Ctrl+C）：', text);
+            });
+        }
+
         function deleteTask(id) {
             if (!confirm('确认删除任务 ' + id + '？')) return;
             fetch(API + '/tasks/' + id, {

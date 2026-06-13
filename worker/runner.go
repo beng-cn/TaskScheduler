@@ -302,7 +302,7 @@ func flashWarmupRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录
 	RecordStep(task, "HTTP 登录管理员", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "CHANGE_ME")
+		token, err = login(ctx, base, "admin", "admin123456")
 		if err != nil {
 			return "", err
 		}
@@ -347,7 +347,7 @@ func cartFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录
 	RecordStep(task, "HTTP 用户登录", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "CHANGE_ME")
+		token, err = login(ctx, base, "admin", "admin123456")
 		if err != nil {
 			return "", err
 		}
@@ -399,7 +399,7 @@ func flashFullCheckRunner(ctx context.Context, task *models.Task) (string, error
 	// 步骤1：登录
 	RecordStep(task, "HTTP 登录管理员", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "CHANGE_ME")
+		token, err = login(ctx, base, "admin", "admin123456")
 		if err != nil {
 			return "", err
 		}
@@ -466,7 +466,7 @@ func orderFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录
 	RecordStep(task, "HTTP 用户登录", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "CHANGE_ME")
+		token, err = login(ctx, base, "admin", "admin123456")
 		if err != nil {
 			return "", err
 		}
@@ -559,7 +559,7 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录管理员
 	RecordStep(task, "HTTP 登录管理员", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "CHANGE_ME")
+		token, err = login(ctx, base, "admin", "admin123456")
 		if err != nil {
 			return "", err
 		}
