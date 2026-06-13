@@ -1,38 +1,40 @@
-# ⚡ TaskScheduler — 轻量级分布式任务调度系统
+# ⚡ 哨兵 Sentinel — 电商系统主动式监控调度平台
 
-> 一个基于 Go 语言开发的任务调度系统，支持异步任务提交、延迟执行、失败重试、超时控制和优雅退出。
+> 基于 Go 语言的任务调度系统，主动监控电商系统 40 个 API，子步骤追踪、失败告警、数据验证全覆盖。
 
 ---
 
 ## 📊 架构概览
 
 ```
-┌──────────────┐     ┌──────────────┐
-│  Web 控制台   │     │  CLI 客户端   │
-└──────┬───────┘     └──────┬───────┘
-       │ HTTP                │ HTTP
-       ▼                     ▼
-┌──────────────────────────────────────┐
-│           API 层 (Gin)               │
-│  任务CRUD / 统计查询 / 健康检查       │
-└──────────────┬───────────────────────┘
-               │
-       ┌───────▼────────┐
-       │   Scheduler    │  ◀── 核心调度引擎
-       │  (goroutine)   │      轮询 → 分发 → 状态管理
-       └───────┬────────┘
-               │
-    ┌──────────┼──────────┐
-    ▼          ▼          ▼
-┌────────┐┌────────┐┌────────┐
-│Worker 1││Worker 2││Worker N│  ◀── Worker Pool
-└────────┘└────────┘└────────┘      (channel 通信)
-    │         │         │
-    └─────────┼─────────┘
-              ▼
-    ┌─────────────────┐
-    │   Memory Store   │  ◀── 可切换为 MySQL/Redis
-    └─────────────────┘
+┌──────────┐    ┌──────────┐    ┌──────────┐
+│ Dashboard │    │ Swagger  │    │ 飞书推送  │
+│ :8888     │    │ :8888/sw │    │ 手机端    │
+└─────┬─────┘    └────┬─────┘    └────┬─────┘
+      │ 轮询           │ 调用          │ Webhook
+      ▼                ▼               ▼
+┌──────────────────────────────────────────┐
+│              API 层 (Gin)                │
+│  CRUD / 统计 / 错误日志 / 鉴权           │
+└──────────────────┬───────────────────────┘
+                   │
+          ┌────────▼────────┐
+          │   Scheduler     │  ◀── goroutine + Ticker
+          │  轮询 → 分发     │      池满告警 / panic恢复
+          └────────┬────────┘
+                   │ channel
+     ┌─────────────┼─────────────┐
+     ▼             ▼             ▼
+┌─────────┐  ┌─────────┐  ┌─────────┐
+│Worker 1 │  │Worker 2 │  │Worker N │  ◀── 10 Worker 协程池
+└────┬────┘  └────┬────┘  └────┬────┘
+     │            │            │
+     └────────────┼────────────┘
+                  ▼
+     ┌───────────────────────┐
+     │  Store 接口            │
+     │  Memory / MySQL / Redis│
+     └───────────────────────┘
 ```
 
 ---
@@ -41,80 +43,56 @@
 
 ### 前提条件
 - Go 1.21+
-- (可选) Docker & Docker Compose
+- MySQL 8.0（可选，默认内存模式）
+- Redis 7（可选）
 
 ### 本地运行
 
 ```bash
-# 克隆项目
-cd task-scheduler
+git clone https://github.com/beng-cn/TaskScheduler.git
+cd TaskScheduler
 
-# 安装依赖
-go mod tidy
+# 内存模式（秒启动）
+go run cmd/server/main.go
 
-# 一行命令启动
-make run
-# 或者: go run cmd/server/main.go
+# MySQL 模式（持久化，需先创建 config.json）
+go run cmd/server/main.go -config config.json
 ```
 
 启动后：
-- **Web 控制台**: http://localhost:8888
-- **健康检查**: `curl http://localhost:8080/api/health`
-- **系统统计**: `curl http://localhost:8080/api/stats`
-
-### Docker 运行
-
-```bash
-make docker
-# 或者: docker-compose up -d
-```
+- **Dashboard**: http://localhost:8888
+- **Swagger 文档**: http://localhost:8888/swagger
+- **错误日志**: http://localhost:8888/api/error-log
 
 ---
 
 ## 📖 API 文档
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/stats` | 系统运行统计 |
-| GET | `/api/task-types` | 支持的任务类型 |
-| POST | `/api/tasks` | 创建任务 |
-| GET | `/api/tasks` | 列出所有任务 |
-| GET | `/api/tasks/:id` | 获取任务详情 |
-| DELETE | `/api/tasks/:id` | 删除任务 |
+| 方法 | 路径 | 说明 | 鉴权 |
+|---|---|---|---|
+| GET | `/api/health` | 健康检查 | ❌ |
+| GET | `/api/stats` | 系统运行统计 | ❌ |
+| GET | `/api/task-types` | 支持的任务类型 | ❌ |
+| GET | `/api/error-log` | 错误日志 | ❌ |
+| GET | `/api/tasks` | 列出所有任务 | ❌ |
+| GET | `/api/tasks/:id` | 任务详情（含子步骤） | ❌ |
+| POST | `/api/tasks` | 创建任务 | ✅ `X-API-Key` |
+| DELETE | `/api/tasks/:id` | 删除任务 | ✅ `X-API-Key` |
 
 ### 创建任务示例
 
 ```bash
-# 真实 HTTP 请求任务（调用 httpbin.org 公开测试 API）
-curl -X POST http://localhost:8080/api/tasks \
+# HTTP 请求
+curl -X POST http://localhost:8888/api/tasks \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "获取公网IP",
-    "type": "http_call",
-    "payload": "{\"url\":\"https://httpbin.org/ip\",\"method\":\"GET\"}",
-    "max_retries": 3,
-    "timeout": 10
-  }'
+  -H "X-API-Key: demo-secret-key" \
+  -d '{"name":"健康检查","type":"http_call","payload":"{\"url\":\"http://localhost:8080/health\",\"method\":\"GET\"}","repeat_sec":60}'
 
-# 数据清理任务（删除过期任务）
-curl -X POST http://localhost:8080/api/tasks \
+# 购物车全链路（5 步：登录→查商品→加购→MySQL验证→API验证）
+curl -X POST http://localhost:8888/api/tasks \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "清理过期任务",
-    "type": "data_clean",
-    "payload": "{}"
-  }'
-
-# 延迟 10 秒执行的 HTTP 请求
-curl -X POST http://localhost:8080/api/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "延迟回调",
-    "type": "http_call",
-    "payload": "{\"url\":\"https://httpbin.org/delay/1\",\"method\":\"GET\"}",
-    "delay": 10
-  }'
+  -H "X-API-Key: demo-secret-key" \
+  -d '{"name":"购物车检查","type":"cart_flow","payload":"{\"base_url\":\"http://localhost:8080\",\"product_id\":\"1\"}","max_retries":1,"timeout":20}'
 ```
 
 ---
@@ -122,31 +100,39 @@ curl -X POST http://localhost:8080/api/tasks \
 ## 🏗️ 项目结构
 
 ```
-task-scheduler/
-├── cmd/
-│   ├── server/main.go       # 服务端入口（含优雅退出）
-│   └── client/main.go       # 命令行客户端
-├── api/
-│   ├── router.go            # 路由注册
-│   ├── handler.go           # HTTP 处理器
-│   └── middleware.go        # 中间件（日志/恢复/CORS）
-├── scheduler/
-│   ├── scheduler.go         # 核心调度引擎
-│   └── task.go              # 任务数据结构 + 状态机
-├── worker/
-│   ├── pool.go              # Worker 协程池
-│   └── runner.go            # 任务执行器（可注册扩展）
-├── store/
-│   ├── store.go             # 存储接口定义
-│   └── memory.go            # 内存实现（开发/测试用）
-├── config/
-│   └── config.go            # 配置加载
-├── web/
-│   └── index.html           # Web 控制台（单文件）
-├── Makefile
-├── Dockerfile
-├── docker-compose.yml
-└── README.md
+TaskScheduler/
+├── cmd/server/main.go       ← 入口
+├── api/                     ← HTTP 层
+│   ├── router.go            │  路由
+│   ├── handler.go           │  8 个端点
+│   └── middleware.go         │  日志/CORS/鉴权
+├── scheduler/               ← 调度引擎
+│   ├── scheduler.go         │  轮询/分发/池健康检查
+│   ├── store.go             │  接口定义
+│   └── task.go              │  类型别名
+├── worker/                  ← 执行层
+│   ├── pool.go              │  Worker 协程池
+│   ├── runner.go            │  8 种内置 runner
+│   └── runner_test.go       │  单元测试
+├── models/task.go           ← 数据模型
+├── store/                   ← 存储实现
+│   ├── memory.go            │  内存（200万写/秒）
+│   ├── mysql.go             │  MySQL 持久化
+│   ├── redis.go             │  Redis 缓存
+│   └── memory_test.go       │  测试 + Benchmark
+├── notify/                  ← 通知层
+│   ├── feishu.go            │  飞书卡片
+│   └── errorlog.go          │  错误日志 + 7天清理
+├── web/                     ← 前端
+│   ├── index.html           │  Dashboard
+│   └── swagger.html         │  Swagger 中文 UI
+├── docs/swagger.json        ← OpenAPI 规范
+├── tasks.json               ← 任务配置（换项目改这个）
+├── config/config.go         ← 配置
+├── .env.example             ← 环境变量示例
+├── git-safe-push.sh         ← 安全提交脚本
+├── Dockerfile / docker-compose.yml
+└── Makefile
 ```
 
 ---
@@ -155,59 +141,85 @@ task-scheduler/
 
 | 组件 | 选型 | 理由 |
 |---|---|---|
-| HTTP 框架 | [Gin](https://github.com/gin-gonic/gin) | Go 生态最流行，性能高 |
-| 并发模型 | goroutine + channel | Go 原生并发，CSP 模式 |
-| 存储 | 接口抽象 (memory/MySQL/Redis) | 接口隔离，便于切换和测试 |
-| 配置 | 内置 JSON 解析 | 零外部依赖，满足需求 |
-| 前端 | 原生 HTML/CSS/JS | 单文件，无框架依赖，秒加载 |
+| 语言 | Go 1.23 | goroutine + channel 原生并发 |
+| HTTP 框架 | Gin | 高性能，中间件丰富 |
+| 数据库驱动 | go-sql-driver/mysql | 标准 MySQL 驱动 |
+| Redis 客户端 | go-redis/v9 | Pipeline/事务/SETNX |
+| 存储模式 | 接口抽象 | 三实现一键切换 |
+| 前端 | 原生 HTML/CSS/JS | 零框架依赖 |
+| API 文档 | Swagger UI 5 (CDN) | 中文汉化 + 自动预授权 |
+| 容器化 | Docker 多阶段构建 | Alpine 镜像 ~15MB |
 
 ---
 
-## 🎯 核心设计要点
+## 🎯 核心功能
 
-### 1. 任务生命周期状态机
-
-```
-PENDING → RUNNING → DONE
-                ↘ FAILED → RETRYING → PENDING (重试)
-                ↘ TIMEOUT
-```
-
-### 2. 并发安全
-
-- `sync.Map` 追踪运行中任务（读多写少场景）
-- 有缓冲 `channel` 解耦调度与执行
-- `sync.RWMutex` 保护统计指标
-
-### 3. 优雅退出
+### 任务生命周期
 
 ```
-收到 SIGTERM
-  → 停止接收新请求 (HTTP Shutdown)
-  → 停止分发新任务 (cancel context)
-  → 排空 Worker 队列中剩余任务
-  → 等待所有执行中任务完成
-  → 关闭存储连接
-  → 安全退出
+pending → running → done
+                  ↘ failed → retrying → pending (重试)
+                  ↘ timeout
 ```
 
-### 4. 接口抽象
+- 延迟执行 / 循环执行 / 优先级调度
+- 失败重试（可配次数和间隔）
+- 超时控制（context.WithTimeout）
+- 优雅退出（signal → HTTP → Worker → Store）
 
-`Store` 接口定义了存储层的完整契约。当前提供内存实现（零依赖秒启动），未来只需新增 `mysql.go` 或 `redis.go` 即可切换后端，无需修改业务代码。
+### 8 种内置 Runner
 
----
-
-## 📈 后续扩展方向
-
-| 功能 | 说明 | 难度 |
+| Runner | 步骤 | 覆盖 API |
 |---|---|---|
-| Cron 定时表达式 | 支持 `0 */6 * * *` 格式的周期性任务 | ⭐⭐ |
-| 分布式部署 | 基于 Redis/etcd 的选主和分布式锁 | ⭐⭐⭐⭐ |
-| 任务依赖 DAG | 支持 A→B→C 的任务依赖编排 | ⭐⭐⭐ |
-| 时间轮调度 | 高精度毫秒级延迟任务（参考 Kafka 设计） | ⭐⭐⭐ |
-| gRPC 协议 | 内部服务间高性能通信 | ⭐⭐ |
-| 指标监控 | Prometheus + Grafana 接入 | ⭐⭐ |
-| 持久化存储 | MySQL/PostgreSQL 存储实现 | ⭐⭐ |
+| `http_call` | 1 | 任意 HTTP 端点 |
+| `data_clean` | 1 | 内部清理 |
+| `flash_warmup` | 3 | 登录→预热→Redis验证 |
+| `cart_flow` | 5 | 登录→商品→加购→MySQL→API |
+| `order_flow` | 5 | 登录→商品→下单→MySQL→API |
+| `user_flow` | 3 | 注册→登录→查信息 |
+| `admin_crud` | 5 | 登录→创建→MySQL→修改→列表 |
+| `flash_full_check` | 6 | 登录→创建→预热→Redis→MySQL→API |
+
+### 子步骤追踪
+
+每个 runner 内部步骤独立计时和状态，展开任务一眼定位哪步挂了。
+
+### 告警通知
+
+- 飞书卡片：任务失败推送完整诊断报告
+- 错误日志：`logs/error.log` JSON 行格式，7 天自动清理
+- Worker 池满告警：50%/90% 两级
+
+### Dashboard ↔ Swagger 联动
+
+Swagger 创建任务 → 浮窗实时同步 → 点击跳转 Dashboard 自动展开
+
+---
+
+## 🧪 测试
+
+```bash
+go test -v ./store/ ./worker/     # 8 项全部 PASS
+go test -bench=. -benchmem ./store/  # Benchmark
+```
+
+Benchmark 数据：MemoryStore 写入 **545 ns/op** (~200 万次/秒)，读取 **62 ns/op** (~1900 万次/秒)
+
+---
+
+## 🔄 复用性
+
+换项目监控只需改 `tasks.json`：
+
+```json
+{
+  "tasks": [
+    {"name": "新项目健康检查", "type": "http_call", "payload": "{\"url\":\"http://新地址/health\",\"method\":\"GET\"}", "repeat_sec": 60}
+  ]
+}
+```
+
+环境变量配置数据库：`MYSQL_DSN` / `REDIS_ADDR` / `FEISHU_WEBHOOK`
 
 ---
 
