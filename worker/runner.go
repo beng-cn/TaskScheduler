@@ -302,7 +302,7 @@ func flashWarmupRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录
 	RecordStep(task, "HTTP 登录管理员", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "admin123456")
+		token, err = login(ctx, base, "admin", "CHANGE_ME")
 		if err != nil {
 			return "", err
 		}
@@ -347,7 +347,7 @@ func cartFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录
 	RecordStep(task, "HTTP 用户登录", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "admin123456")
+		token, err = login(ctx, base, "admin", "CHANGE_ME")
 		if err != nil {
 			return "", err
 		}
@@ -399,7 +399,7 @@ func flashFullCheckRunner(ctx context.Context, task *models.Task) (string, error
 	// 步骤1：登录
 	RecordStep(task, "HTTP 登录管理员", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "admin123456")
+		token, err = login(ctx, base, "admin", "CHANGE_ME")
 		if err != nil {
 			return "", err
 		}
@@ -466,7 +466,7 @@ func orderFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录
 	RecordStep(task, "HTTP 用户登录", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "admin123456")
+		token, err = login(ctx, base, "admin", "CHANGE_ME")
 		if err != nil {
 			return "", err
 		}
@@ -559,7 +559,7 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤1：登录管理员
 	RecordStep(task, "HTTP 登录管理员", func() (string, error) {
 		var err error
-		token, err = login(ctx, base, "admin", "admin123456")
+		token, err = login(ctx, base, "admin", "CHANGE_ME")
 		if err != nil {
 			return "", err
 		}
@@ -569,20 +569,47 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 		return "", fmt.Errorf("%s", task.Steps[0].Error)
 	}
 
-	// 步骤2：创建商品
+	// 步骤2：创建商品（并解析返回的 ID）
+	var createResp string
 	RecordStep(task, "HTTP 创建商品", func() (string, error) {
 		body := fmt.Sprintf(`{"name":"哨兵测试商品-%d","category_id":1,"price":9.99,"stock":999,"keywords":"test"}`, time.Now().UnixNano()%10000)
-		return httpPost(ctx, base+"/api/admin/product", token, body)
+		var err error
+		createResp, err = httpPost(ctx, base+"/api/admin/product", token, body)
+		if err != nil {
+			return "", err
+		}
+		// 解析响应中的商品 ID
+		var result struct {
+			Data struct {
+				ID int `json:"id"`
+			} `json:"data"`
+		}
+		start := 0
+		for i, c := range createResp {
+			if c == '{' { start = i; break }
+		}
+		if start > 0 {
+			json.Unmarshal([]byte(createResp[start:]), &result)
+		}
+		if result.Data.ID > 0 {
+			productID = fmt.Sprintf("%d", result.Data.ID)
+		}
+		return createResp, nil
 	})
 
 	// 步骤3：MySQL 验证商品写入
 	RecordStep(task, "MySQL 验证商品写入", func() (string, error) {
-		productID = "1" // 简化，如果创建成功用返回的 ID
-		return queryMySQL("SELECT COUNT(*) FROM products WHERE keywords='test'")
+		if productID == "" {
+			return "", fmt.Errorf("未获取到商品ID")
+		}
+		return queryMySQL("SELECT COUNT(*) FROM products WHERE id=" + productID)
 	})
 
-	// 步骤4：修改商品
+	// 步骤4：修改商品（使用真实 ID）
 	RecordStep(task, "HTTP 修改商品价格", func() (string, error) {
+		if productID == "" {
+			productID = "1"
+		}
 		return httpPost(ctx, base+"/api/admin/product/"+productID, token, `{"price":8.88}`)
 	})
 
