@@ -81,6 +81,16 @@ func stepFailed(task *models.Task) (bool, string) {
 	return false, ""
 }
 
+// finalResult 统一检查子步骤状态，任何一步失败则返回 error。
+// 所有多步 runner 必须在 return 前调用此函数。
+func finalResult(task *models.Task, label string) (string, error) {
+	if failed, step := stepFailed(task); failed {
+		return fmt.Sprintf("%s失败: 第「%s」步出错，共 %d 步", label, step, len(task.Steps)),
+			fmt.Errorf("子步骤失败: %s", step)
+	}
+	return fmt.Sprintf("%s完成，共 %d 步", label, len(task.Steps)), nil
+}
+
 // RecordStep 执行一个子步骤并自动记录结果到 task.Steps。
 // fn 返回 (摘要, error)，失败时步骤标记为 failed。
 func RecordStep(task *models.Task, name string, fn func() (string, error)) {
@@ -333,7 +343,7 @@ func flashWarmupRunner(ctx context.Context, task *models.Task) (string, error) {
 	})
 
 	if failed, step := stepFailed(task); failed { return fmt.Sprintf("共 %d 步，第「"+step+"」步失败", len(task.Steps)), fmt.Errorf("子步骤失败: %s", step) }
-	return fmt.Sprintf("秒杀预热检查完成，共 %d 步", len(task.Steps)), nil
+	return finalResult(task, "秒杀预热检查")
 }
 
 // --- cart_flow（5 步） ---
@@ -389,7 +399,7 @@ func cartFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 		return httpGet(ctx, base+"/api/auth/cart/list", token)
 	})
 
-	return fmt.Sprintf("购物车流程完成，共 %d 步", len(task.Steps)), nil
+	return finalResult(task, "购物车流程")
 }
 
 // --- flash_full_check（6 步） ---
@@ -452,7 +462,7 @@ func flashFullCheckRunner(ctx context.Context, task *models.Task) (string, error
 		return httpGet(ctx, base+"/api/flash/list", "")
 	})
 
-	return fmt.Sprintf("秒杀全链路检查完成，共 %d 步", len(task.Steps)), nil
+	return finalResult(task, "秒杀全链路检查")
 }
 
 // --- order_flow（5 步：登录→选品→下单→MySQL验证→查订单） ---
@@ -507,7 +517,7 @@ func orderFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 		return httpGet(ctx, base+"/api/auth/order/list", token)
 	})
 
-	return fmt.Sprintf("下单流程完成，共 %d 步", len(task.Steps)), nil
+	return finalResult(task, "下单流程")
 }
 
 // --- user_flow（3 步：注册→登录→查信息） ---
@@ -549,7 +559,7 @@ func userFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 		return httpGet(ctx, base+"/api/auth/user/info", token)
 	})
 
-	return fmt.Sprintf("用户流程完成，共 %d 步", len(task.Steps)), nil
+	return finalResult(task, "用户流程")
 }
 
 // --- admin_crud（5 步：登录→创建商品→查询→修改→删除） ---
@@ -629,5 +639,5 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 		return httpGet(ctx, base+"/api/product/list", "")
 	})
 
-	return fmt.Sprintf("后台管理流程完成，共 %d 步", len(task.Steps)), nil
+	return finalResult(task, "后台管理流程")
 }
