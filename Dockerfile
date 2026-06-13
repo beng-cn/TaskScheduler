@@ -29,12 +29,13 @@ WORKDIR /app
 # 从编译阶段复制二进制文件
 COPY --from=builder /app/scheduler .
 COPY --from=builder /app/web ./web
+COPY --from=builder /app/tasks.json .
 
 # 暴露 HTTP 端口
-EXPOSE 8080
+EXPOSE 8888
 
 # 健康检查
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD wget -qO- http://localhost:8080/api/health || exit 1
+    CMD wget -qO- http://localhost:8888/api/health || exit 1
 
 ENTRYPOINT ["./scheduler"]

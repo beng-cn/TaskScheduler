@@ -41,22 +41,32 @@
 
 ## 🚀 快速开始
 
-### 前提条件
-- Go 1.21+
-- MySQL 8.0（可选，默认内存模式）
-- Redis 7（可选）
-
-### 本地运行
+### 方式一：Docker（推荐，零依赖）
 
 ```bash
 git clone https://github.com/beng-cn/TaskScheduler.git
 cd TaskScheduler
+docker-compose up -d
+```
 
-# 内存模式（秒启动）
-go run cmd/server/main.go
+镜像约 15MB，Go 依赖、CA 证书全部内置，无需安装任何运行时。
 
-# MySQL 模式（持久化，需先创建 config.json）
-go run cmd/server/main.go -config config.json
+### 方式二：本地 Go 运行
+
+```bash
+# 前提：Go 1.21+
+git clone https://github.com/beng-cn/TaskScheduler.git
+cd TaskScheduler
+go run cmd/server/main.go          # 内存模式，秒启动
+go run cmd/server/main.go -config config.json  # MySQL 持久化
+```
+
+### 方式三：Make
+
+```bash
+make run          # 内存模式
+make run-mysql    # MySQL 模式
+make docker       # Docker Compose
 ```
 
 启动后：
