@@ -635,7 +635,20 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 		if productID == "" {
 			productID = "1"
 		}
-		return httpPost(ctx, base+"/api/admin/product/"+productID, token, `{"price":8.88}`)
+		// 修改商品用 PUT 方法
+		req, _ := http.NewRequestWithContext(ctx, "PUT", base+"/api/admin/product/"+productID, strings.NewReader(`{"price":8.88}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode >= 400 {
+			return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(raw))
+		}
+		return fmt.Sprintf("%%d — %%s", resp.StatusCode, truncateStr(string(raw), 200)), nil
 	})
 
 	// 步骤5：查商品列表
