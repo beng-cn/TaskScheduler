@@ -391,7 +391,7 @@ func cartFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 
 	// 步骤4：MySQL 验证购物车记录
 	RecordStep(task, "MySQL 验证购物车写入", func() (string, error) {
-		return queryMySQL("SELECT COUNT(*) FROM cart_items WHERE user_id=1")
+		return queryMySQL("SELECT COUNT(*) FROM carts WHERE user_id=1")
 	})
 
 	// 步骤5：API 验证购物车列表
