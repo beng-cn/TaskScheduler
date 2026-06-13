@@ -59,8 +59,9 @@ func (m *MySQLStore) autoMigrate() error {
 			priority     INT           NOT NULL DEFAULT 0,
 			retries      INT           NOT NULL DEFAULT 0,
 			max_retries  INT           NOT NULL DEFAULT 3,
-			timeout      BIGINT        NOT NULL DEFAULT 30,
-			repeat_sec   BIGINT        NOT NULL DEFAULT 0,
+			timeout       BIGINT        NOT NULL DEFAULT 30,
+			max_latency_ms BIGINT      NOT NULL DEFAULT 0,
+			repeat_sec    BIGINT        NOT NULL DEFAULT 0,
 			scheduled_at DATETIME      NULL,
 			started_at   DATETIME      NULL,
 			finished_at  DATETIME      NULL,
@@ -102,10 +103,10 @@ func (m *MySQLStore) CreateTask(ctx context.Context, task *models.Task) error {
 
 	stepsJSON, _ := json.Marshal(task.Steps)
 	_, err := m.db.ExecContext(ctx,
-		`INSERT INTO tasks (id, name, type, payload, status, priority, retries, max_retries, timeout, repeat_sec, scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at)
+		`INSERT INTO tasks (id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec, scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Type, task.Payload, task.Status, task.Priority,
-		task.Retries, task.MaxRetries, task.Timeout, task.RepeatSec,
+		task.Retries, task.MaxRetries, task.Timeout, task.MaxLatencyMs, task.RepeatSec,
 		nullTime(task.ScheduledAt), nullTimePtr(task.StartedAt), nullTimePtr(task.FinishedAt),
 		task.Result, task.Error, string(stepsJSON), task.CreatedAt, task.UpdatedAt,
 	)
@@ -114,7 +115,7 @@ func (m *MySQLStore) CreateTask(ctx context.Context, task *models.Task) error {
 
 func (m *MySQLStore) GetTask(ctx context.Context, id string) (*models.Task, error) {
 	row := m.db.QueryRowContext(ctx,
-		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, repeat_sec,
+		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec,
 		        scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at
 		 FROM tasks WHERE id = ?`, id)
 	return scanTask(row)
@@ -122,7 +123,7 @@ func (m *MySQLStore) GetTask(ctx context.Context, id string) (*models.Task, erro
 
 func (m *MySQLStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, repeat_sec,
+		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec,
 		        scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at
 		 FROM tasks ORDER BY priority DESC, created_at ASC`)
 	if err != nil {
@@ -134,7 +135,7 @@ func (m *MySQLStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
 
 func (m *MySQLStore) ListPendingTasks(ctx context.Context) ([]*models.Task, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, repeat_sec,
+		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec,
 		        scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at
 		 FROM tasks WHERE status = ? AND (scheduled_at IS NULL OR scheduled_at <= ?)
 		 ORDER BY priority DESC, created_at ASC`,
@@ -154,7 +155,7 @@ func (m *MySQLStore) UpdateTask(ctx context.Context, task *models.Task) error {
 		 timeout=?, repeat_sec=?, scheduled_at=?, started_at=?, finished_at=?, result=?, error=?, steps=?, updated_at=?
 		 WHERE id=?`,
 		task.Name, task.Type, task.Payload, task.Status, task.Priority,
-		task.Retries, task.MaxRetries, task.Timeout, task.RepeatSec,
+		task.Retries, task.MaxRetries, task.Timeout, task.MaxLatencyMs, task.RepeatSec,
 		nullTime(task.ScheduledAt), nullTimePtr(task.StartedAt), nullTimePtr(task.FinishedAt),
 		task.Result, task.Error, string(stepsJSON), task.UpdatedAt, task.ID,
 	)
@@ -202,7 +203,7 @@ func scanTask(scanner interface {
 	var stepsJSON sql.NullString
 	err := scanner.Scan(
 		&t.ID, &t.Name, &t.Type, &t.Payload, &t.Status, &t.Priority,
-		&t.Retries, &t.MaxRetries, &t.Timeout, &t.RepeatSec,
+		&t.Retries, &t.MaxRetries, &t.Timeout, &t.MaxLatencyMs, &t.RepeatSec,
 		&scheduledAt, &startedAt, &finishedAt,
 		&t.Result, &t.Error, &stepsJSON, &t.CreatedAt, &t.UpdatedAt,
 	)

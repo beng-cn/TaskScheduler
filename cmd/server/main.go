@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"encoding/json"
 	"os"
 	"os/signal"
 	"syscall"
@@ -71,7 +72,7 @@ func main() {
 	// 注入 MySQL/Redis 连接（供多步验证 runner 使用，通过环境变量配置）
 	mysqlConn := os.Getenv("MYSQL_DSN")
 	if mysqlConn == "" {
-		mysqlConn = "root:password@tcp(127.0.0.1:3306)/Online_Shopping_System" // 默认值，启动前请设置 MYSQL_DSN 环境变量
+		mysqlConn = "root:password@tcp(127.0.0.1:3306)/Online_Shopping_System" // 默认值，可覆盖
 	}
 	redisConn := os.Getenv("REDIS_ADDR")
 	if redisConn == "" {
@@ -137,6 +138,8 @@ func main() {
 			clone.FinishedAt = nil
 			clone.Result = ""
 			clone.Error = ""
+			// 删除旧的循环任务实例，避免无限累积
+			_ = taskStore.DeleteTask(ctx, task.ID)
 			if err := sched.Submit(clone); err != nil {
 				log.Printf("[循环] 重新创建任务「%s」失败: %v", task.Name, err)
 			} else {
@@ -157,7 +160,7 @@ func main() {
 	}
 
 	// --- 5. 预先创建几个演示任务 ---
-	createDemoTasks(sched)
+	tasksPath := "tasks.json"; loadTasksFromFile(sched, tasksPath)
 
 	// --- 6. 启动调度器 ---
 	sched.Start()
@@ -196,59 +199,54 @@ func main() {
 	log.Println("═══════════════════════════════════════════")
 }
 
-// createDemoTasks 创建一批演示任务，方便面试时直接看到系统运行效果。
-func createDemoTasks(sched *scheduler.Scheduler) {
-	demoTasks := []*scheduler.Task{
-		// 每 60 秒循环健康检查
-		{
-			Name:       "电商健康检查-每60秒",
-			Type:       "http_call",
-			Payload:    `{"url":"http://localhost:8080/health","method":"GET"}`,
-			MaxRetries: 2,
-			Timeout:    10,
-			RepeatSec:  60,
-		},
-		// 加入购物车全链路（5步：登录→查商品→加购→MySQL验证→API验证）
-		{
-			Name:       "加入购物车全链路验证",
-			Type:       "cart_flow",
-			Payload:    `{"base_url":"http://localhost:8080","product_id":"1"}`,
-			MaxRetries: 1,
-			Timeout:    20,
-		},
-		// 秒杀预热检查（3步：登录→预热→Redis验证）
-		{
-			Name:       "秒杀预热检查",
-			Type:       "flash_warmup",
-			Payload:    `{"base_url":"http://localhost:8080","flash_id":"1"}`,
-			MaxRetries: 1,
-			Timeout:    10,
-		},
-		// 秒杀全链路检查（6步：登录→创建→预热→Redis→MySQL→API）
-		{
-			Name:       "秒杀全链路验证",
-			Type:       "flash_full_check",
-			Payload:    `{"base_url":"http://localhost:8080"}`,
-			MaxRetries: 1,
-			Timeout:    30,
-		},
-		// 清理过期任务
-		{
-			Name:       "清理过期任务",
-			Type:       "data_clean",
-			Payload:    "{}",
-			MaxRetries: 1,
-			Timeout:    10,
-		},
+// taskFileConfig JSON 任务配置文件的格式。
+type taskFileConfig struct {
+	Tasks []struct {
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		Payload    string `json:"payload"`
+		MaxRetries int    `json:"max_retries"`
+		Timeout      int64  `json:"timeout"`
+			MaxLatencyMs int64  `json:"max_latency_ms"`
+		RepeatSec  int64  `json:"repeat_sec"`
+		Delay      int64  `json:"delay"`
+		Priority   int    `json:"priority"`
+	} `json:"tasks"`
+}
+
+// loadTasksFromFile 从 JSON 文件加载任务定义并批量创建。
+// 换项目只需准备一个新的 tasks.json 即可，无需改代码。
+func loadTasksFromFile(sched *scheduler.Scheduler, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("[TaskFile] 任务配置文件 %s 不存在，跳过（可指定 -tasks 参数）", path)
+		return
 	}
 
-	for _, task := range demoTasks {
+	var cfg taskFileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Printf("[TaskFile] 解析 %s 失败: %v", path, err)
+		return
+	}
+
+	for _, t := range cfg.Tasks {
+		task := &scheduler.Task{
+			Name:        t.Name,
+			Type:        t.Type,
+			Payload:     t.Payload,
+			MaxRetries:  t.MaxRetries,
+			Timeout:     t.Timeout,
+			RepeatSec:   t.RepeatSec,
+			MaxLatencyMs: t.MaxLatencyMs,
+			Priority:    t.Priority,
+			ScheduledAt: time.Now().Add(time.Duration(t.Delay) * time.Second),
+		}
 		if err := sched.Submit(task); err != nil {
-			log.Printf("[Demo] 创建演示任务失败: %v", err)
+			log.Printf("[TaskFile] 创建任务 %s 失败: %v", t.Name, err)
 		} else {
-			log.Printf("[Demo] 已创建演示任务: %s (类型: %s, ID: %s)", task.Name, task.Type, task.ID)
+			log.Printf("[TaskFile] 已创建: %s (类型: %s, ID: %s)", task.Name, task.Type, task.ID)
 		}
 	}
 
-	log.Printf("[Demo] 共创建 %d 个演示任务", len(demoTasks))
+	log.Printf("[TaskFile] 从 %s 加载了 %d 个任务", path, len(cfg.Tasks))
 }

@@ -1,0 +1,61 @@
+{
+  "tasks": [
+    {
+      "name": "电商健康检查-每60秒",
+      "type": "http_call",
+      "payload": "{\"url\":\"http://localhost:8080/health\",\"method\":\"GET\"}",
+      "max_retries": 2,
+      "timeout": 10,
+      "repeat_sec": 60
+    },
+    {
+      "name": "加入购物车全链路验证",
+      "type": "cart_flow",
+      "payload": "{\"base_url\":\"http://localhost:8080\",\"product_id\":\"1\"}",
+      "max_retries": 1,
+      "timeout": 20
+    },
+    {
+      "name": "下单全链路验证",
+      "type": "order_flow",
+      "payload": "{\"base_url\":\"http://localhost:8080\",\"product_id\":\"1\"}",
+      "max_retries": 1,
+      "timeout": 20
+    },
+    {
+      "name": "用户注册登录验证",
+      "type": "user_flow",
+      "payload": "{\"base_url\":\"http://localhost:8080\"}",
+      "max_retries": 1,
+      "timeout": 20
+    },
+    {
+      "name": "后台管理CRUD验证",
+      "type": "admin_crud",
+      "payload": "{\"base_url\":\"http://localhost:8080\"}",
+      "max_retries": 1,
+      "timeout": 20
+    },
+    {
+      "name": "秒杀预热检查",
+      "type": "flash_warmup",
+      "payload": "{\"base_url\":\"http://localhost:8080\",\"flash_id\":\"1\"}",
+      "max_retries": 1,
+      "timeout": 10
+    },
+    {
+      "name": "秒杀全链路验证",
+      "type": "flash_full_check",
+      "payload": "{\"base_url\":\"http://localhost:8080\"}",
+      "max_retries": 1,
+      "timeout": 30
+    },
+    {
+      "name": "清理过期任务",
+      "type": "data_clean",
+      "payload": "{}",
+      "max_retries": 1,
+      "timeout": 10
+    }
+  ]
+}

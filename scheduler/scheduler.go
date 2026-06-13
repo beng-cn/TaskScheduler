@@ -136,6 +136,14 @@ type SchedulerStats struct {
 // 定时轮询存储中的待执行任务，分发给 Worker 池执行。
 func (s *Scheduler) dispatchLoop() {
 	defer s.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[Scheduler] PANIC 恢复: %v，调度循环即将重启", r)
+			// 重启调度循环
+			s.wg.Add(1)
+			go s.dispatchLoop()
+		}
+	}()
 
 	ticker := time.NewTicker(s.cfg.Scheduler.PollInterval)
 	defer ticker.Stop()
@@ -144,9 +152,24 @@ func (s *Scheduler) dispatchLoop() {
 		select {
 		case <-ticker.C:
 			s.pollAndDispatch()
+			s.checkPoolHealth()
 		case <-s.ctx.Done():
 			log.Println("[Scheduler] 调度循环收到退出信号")
 			return
+		}
+	}
+}
+
+// checkPoolHealth 检查 Worker 池健康度，必要时发出告警。
+func (s *Scheduler) checkPoolHealth() {
+	stats := s.pool.Stats()
+	if stats.QueueCap > 0 {
+		usage := float64(stats.QueueLen) / float64(stats.QueueCap)
+		if usage >= 0.9 {
+			log.Printf("[Scheduler] 队列即将满: %d/%d (%.0f%%)", stats.QueueLen, stats.QueueCap, usage*100)
+		}
+		if usage >= 0.5 {
+			log.Printf("[Scheduler] 队列积压: %d/%d (%.0f%%)", stats.QueueLen, stats.QueueCap, usage*100)
 		}
 	}
 }

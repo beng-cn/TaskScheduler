@@ -58,7 +58,7 @@ make run
 ```
 
 启动后：
-- **Web 控制台**: http://localhost:8080
+- **Web 控制台**: http://localhost:8888
 - **健康检查**: `curl http://localhost:8080/api/health`
 - **系统统计**: `curl http://localhost:8080/api/stats`
 

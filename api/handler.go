@@ -162,5 +162,5 @@ func (h *Handler) ErrorLog(c *gin.Context) {
 
 // supportedTypes 返回当前注册的所有任务类型。
 func supportedTypes() []string {
-	return []string{"http_call", "data_clean", "flash_warmup", "cart_flow", "flash_full_check"}
+	return []string{"http_call", "data_clean", "flash_warmup", "cart_flow", "flash_full_check", "order_flow", "user_flow", "admin_crud"}
 }

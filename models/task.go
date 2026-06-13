@@ -30,8 +30,9 @@ type Task struct {
 	Priority    int        `json:"priority"`     // 优先级（数字越大越优先）
 	Retries     int        `json:"retries"`      // 已重试次数
 	MaxRetries  int        `json:"max_retries"`  // 最大重试次数
-	Timeout     int64      `json:"timeout"`      // 超时时间（秒）
-	RepeatSec   int64      `json:"repeat_sec"`   // 完成后间隔多少秒再次执行，0 表示不重复
+	Timeout      int64      `json:"timeout"`       // 超时时间（秒）
+	MaxLatencyMs int64      `json:"max_latency_ms"` // 响应延迟阈值（毫秒），超过告警但不算失败
+	RepeatSec    int64      `json:"repeat_sec"`    // 完成后间隔多少秒再次执行，0 表示不重复
 	ScheduledAt time.Time  `json:"scheduled_at"` // 计划执行时间
 	StartedAt   *time.Time `json:"started_at"`   // 实际开始执行时间
 	FinishedAt  *time.Time `json:"finished_at"`  // 完成时间

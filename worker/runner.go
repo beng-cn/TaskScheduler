@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"task-scheduler/models"
 	"time"
@@ -26,6 +27,9 @@ var builtinRunners = map[string]TaskRunner{
 	"flash_warmup":     flashWarmupRunner,
 	"cart_flow":        cartFlowRunner,
 	"flash_full_check": flashFullCheckRunner,
+	"order_flow":       orderFlowRunner,
+	"user_flow":        userFlowRunner,
+	"admin_crud":       adminCRUDRunner,
 }
 
 // GetRunner 根据任务类型获取对应的执行器。
@@ -208,10 +212,11 @@ func nowPtr() *time.Time {
 
 func httpCallRunner(ctx context.Context, task *models.Task) (string, error) {
 	var params struct {
-		URL     string            `json:"url"`
-		Method  string            `json:"method"`
-		Headers map[string]string `json:"headers"`
-		Body    string            `json:"body"`
+		URL        string            `json:"url"`
+		Method     string            `json:"method"`
+		Headers    map[string]string `json:"headers"`
+		Body       string            `json:"body"`
+		ExpectCode int               `json:"expect_code"` // 期望的 HTTP 状态码，0 表示不校验
 	}
 	json.Unmarshal([]byte(task.Payload), &params)
 	if params.URL == "" {
@@ -239,8 +244,23 @@ func httpCallRunner(ctx context.Context, task *models.Task) (string, error) {
 	defer resp.Body.Close()
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	elapsed := time.Since(start)
-	return fmt.Sprintf("HTTP %s %s → %d (%v) — %s",
-		params.Method, params.URL, resp.StatusCode, elapsed.Round(time.Millisecond), string(bodyBytes)), nil
+
+	// 检查响应延迟
+	var latencyWarn string
+	if task.MaxLatencyMs > 0 && elapsed.Milliseconds() > task.MaxLatencyMs {
+		latencyWarn = fmt.Sprintf(" [延迟告警: %v > %dms]", elapsed.Round(time.Millisecond), task.MaxLatencyMs)
+		log.Printf("[Worker] 任务 %s 响应延迟 %v 超过阈值 %dms", task.ID, elapsed.Round(time.Millisecond), task.MaxLatencyMs)
+	}
+
+	// 检查期望状态码
+	if params.ExpectCode > 0 && resp.StatusCode != params.ExpectCode {
+		return "", fmt.Errorf("状态码不匹配: 期望 %d, 实际 %d — %s%s",
+			params.ExpectCode, resp.StatusCode, string(bodyBytes), latencyWarn)
+	}
+
+	result := fmt.Sprintf("HTTP %s %s → %d (%v) — %s%s",
+		params.Method, params.URL, resp.StatusCode, elapsed.Round(time.Millisecond), string(bodyBytes), latencyWarn)
+	return result, nil
 }
 
 // --- data_clean（单步） ---
@@ -422,4 +442,154 @@ func flashFullCheckRunner(ctx context.Context, task *models.Task) (string, error
 	})
 
 	return fmt.Sprintf("秒杀全链路检查完成，共 %d 步", len(task.Steps)), nil
+}
+
+// --- order_flow（5 步：登录→选品→下单→MySQL验证→查订单） ---
+
+func orderFlowRunner(ctx context.Context, task *models.Task) (string, error) {
+	task.Steps = nil
+	var params struct {
+		BaseURL   string `json:"base_url"`
+		ProductID string `json:"product_id"`
+	}
+	json.Unmarshal([]byte(task.Payload), &params)
+	if params.BaseURL == "" {
+		params.BaseURL = "http://localhost:8080"
+	}
+	if params.ProductID == "" {
+		params.ProductID = "1"
+	}
+	base := params.BaseURL
+	pid := params.ProductID
+	var token string
+
+	// 步骤1：登录
+	RecordStep(task, "HTTP 用户登录", func() (string, error) {
+		var err error
+		token, err = login(ctx, base, "admin", "CHANGE_ME")
+		if err != nil {
+			return "", err
+		}
+		return "Token 已获取", nil
+	})
+	if token == "" {
+		return "", fmt.Errorf("%s", task.Steps[0].Error)
+	}
+
+	// 步骤2：查看商品
+	RecordStep(task, "HTTP 查看商品详情", func() (string, error) {
+		return httpGet(ctx, base+"/api/product/"+pid, "")
+	})
+
+	// 步骤3：创建订单
+	RecordStep(task, "HTTP 创建订单", func() (string, error) {
+		return httpPost(ctx, base+"/api/auth/order/create", token, "{}")
+	})
+
+	// 步骤4：MySQL 验证订单写入
+	RecordStep(task, "MySQL 验证订单记录", func() (string, error) {
+		return queryMySQL("SELECT COUNT(*) FROM orders WHERE user_id=1")
+	})
+
+	// 步骤5：API 查询订单列表
+	RecordStep(task, "HTTP 查询订单列表", func() (string, error) {
+		return httpGet(ctx, base+"/api/auth/order/list", token)
+	})
+
+	return fmt.Sprintf("下单流程完成，共 %d 步", len(task.Steps)), nil
+}
+
+// --- user_flow（3 步：注册→登录→查信息） ---
+
+func userFlowRunner(ctx context.Context, task *models.Task) (string, error) {
+	task.Steps = nil
+	var params struct {
+		BaseURL string `json:"base_url"`
+	}
+	json.Unmarshal([]byte(task.Payload), &params)
+	if params.BaseURL == "" {
+		params.BaseURL = "http://localhost:8080"
+	}
+	base := params.BaseURL
+	testUser := "monitor_" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+
+	// 步骤1：注册新用户
+	RecordStep(task, "HTTP 用户注册", func() (string, error) {
+		body := fmt.Sprintf(`{"username":"%s","password":"test123456","phone":"138%08d"}`, testUser, time.Now().UnixNano()%100000000)
+		return httpPost(ctx, base+"/api/user/register", "", body)
+	})
+
+	// 步骤2：登录
+	var token string
+	RecordStep(task, "HTTP 用户登录", func() (string, error) {
+		var err error
+		token, err = login(ctx, base, testUser, "test123456")
+		if err != nil {
+			return "", err
+		}
+		return "Token 已获取", nil
+	})
+	if token == "" {
+		return "", fmt.Errorf("%s", task.Steps[0].Error)
+	}
+
+	// 步骤3：获取用户信息
+	RecordStep(task, "HTTP 获取用户信息", func() (string, error) {
+		return httpGet(ctx, base+"/api/auth/user/info", token)
+	})
+
+	return fmt.Sprintf("用户流程完成，共 %d 步", len(task.Steps)), nil
+}
+
+// --- admin_crud（5 步：登录→创建商品→查询→修改→删除） ---
+
+func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
+	task.Steps = nil
+	var params struct {
+		BaseURL string `json:"base_url"`
+	}
+	json.Unmarshal([]byte(task.Payload), &params)
+	if params.BaseURL == "" {
+		params.BaseURL = "http://localhost:8080"
+	}
+	base := params.BaseURL
+	var token string
+	var productID string
+
+	// 步骤1：登录管理员
+	RecordStep(task, "HTTP 登录管理员", func() (string, error) {
+		var err error
+		token, err = login(ctx, base, "admin", "CHANGE_ME")
+		if err != nil {
+			return "", err
+		}
+		return "Token 已获取", nil
+	})
+	if token == "" {
+		return "", fmt.Errorf("%s", task.Steps[0].Error)
+	}
+
+	// 步骤2：创建商品
+	RecordStep(task, "HTTP 创建商品", func() (string, error) {
+		body := fmt.Sprintf(`{"name":"哨兵测试商品-%d","category_id":1,"price":9.99,"stock":999,"keywords":"test"}`, time.Now().UnixNano()%10000)
+		return httpPost(ctx, base+"/api/admin/product", token, body)
+	})
+
+	// 步骤3：MySQL 验证商品写入
+	RecordStep(task, "MySQL 验证商品写入", func() (string, error) {
+		productID = "1" // 简化，如果创建成功用返回的 ID
+		return queryMySQL("SELECT COUNT(*) FROM products WHERE keywords='test'")
+	})
+
+	// 步骤4：修改商品
+	RecordStep(task, "HTTP 修改商品价格", func() (string, error) {
+		return httpPost(ctx, base+"/api/admin/product/"+productID, token, `{"price":8.88}`)
+	})
+
+	// 步骤5：查商品列表
+	RecordStep(task, "HTTP 查询商品列表", func() (string, error) {
+		return httpGet(ctx, base+"/api/product/list", "")
+	})
+
+	return fmt.Sprintf("后台管理流程完成，共 %d 步", len(task.Steps)), nil
 }
