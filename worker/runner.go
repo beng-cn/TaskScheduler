@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"task-scheduler/models"
 	"time"
 
@@ -605,12 +606,14 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 				ID int `json:"id"`
 			} `json:"data"`
 		}
-		start := 0
-		for i, c := range createResp {
-			if c == '{' { start = i; break }
+		// 从响应中提取 JSON（去掉 "200 — " 前缀和尾部 "..."）
+		jsonStr := createResp
+		for i, c := range jsonStr {
+			if c == '{' { jsonStr = jsonStr[i:]; break }
 		}
-		if start > 0 {
-			json.Unmarshal([]byte(createResp[start:]), &result)
+		jsonStr = strings.TrimSuffix(jsonStr, "...")
+		if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+			log.Printf("[admin_crud] 解析商品ID失败: %v, raw: %s", err, createResp[:min(len(createResp),100)])
 		}
 		if result.Data.ID > 0 {
 			productID = fmt.Sprintf("%d", result.Data.ID)

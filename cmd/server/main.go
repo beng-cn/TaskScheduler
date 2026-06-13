@@ -72,7 +72,7 @@ func main() {
 	// 注入 MySQL/Redis 连接（供多步验证 runner 使用，通过环境变量配置）
 	mysqlConn := os.Getenv("MYSQL_DSN")
 	if mysqlConn == "" {
-		mysqlConn = "root:181871ZX@tcp(127.0.0.1:3306)/Online_Shopping_System" // 默认值，可覆盖
+		mysqlConn = "root:password@tcp(127.0.0.1:3306)/Online_Shopping_System" // 默认值，可覆盖
 	}
 	redisConn := os.Getenv("REDIS_ADDR")
 	if redisConn == "" {
@@ -107,7 +107,7 @@ func main() {
 	// 配置飞书告警 Webhook
 	feishuHook := os.Getenv("FEISHU_WEBHOOK")
 	if feishuHook == "" {
-		feishuHook = "https://open.feishu.cn/open-apis/bot/v2/hook/cfa4f2eb-b48a-46e1-9f03-ff57ac80296e"
+		feishuHook = "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_KEY_HERE"
 	}
 	notify.SetWebhook(feishuHook)
 	// 初始化错误日志文件（超过 7 天自动清理）
