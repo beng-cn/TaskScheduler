@@ -71,6 +71,16 @@ func SetOnTaskComplete(fn TaskCallback) { onTaskComplete = fn }
 
 // --- 辅助函数 ---
 
+// stepFailed 检查是否有子步骤失败。
+func stepFailed(task *models.Task) (bool, string) {
+	for _, s := range task.Steps {
+		if s.Status == "failed" {
+			return true, s.Name
+		}
+	}
+	return false, ""
+}
+
 // RecordStep 执行一个子步骤并自动记录结果到 task.Steps。
 // fn 返回 (摘要, error)，失败时步骤标记为 failed。
 func RecordStep(task *models.Task, name string, fn func() (string, error)) {
@@ -322,6 +332,7 @@ func flashWarmupRunner(ctx context.Context, task *models.Task) (string, error) {
 		return queryRedis("flash:stock:" + fid)
 	})
 
+	if failed, step := stepFailed(task); failed { return fmt.Sprintf("共 %d 步，第「"+step+"」步失败", len(task.Steps)), fmt.Errorf("子步骤失败: %s", step) }
 	return fmt.Sprintf("秒杀预热检查完成，共 %d 步", len(task.Steps)), nil
 }
 
