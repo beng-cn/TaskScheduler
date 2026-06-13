@@ -32,8 +32,11 @@ type Task struct {
 	MaxRetries  int        `json:"max_retries"`  // 最大重试次数
 	Timeout      int64      `json:"timeout"`       // 超时时间（秒）
 	MaxLatencyMs int64      `json:"max_latency_ms"` // 响应延迟阈值（毫秒），超过告警但不算失败
-	RepeatSec    int64      `json:"repeat_sec"`    // 完成后间隔多少秒再次执行，0 表示不重复
-	ScheduledAt time.Time  `json:"scheduled_at"` // 计划执行时间
+	RepeatSec    int64      `json:"repeat_sec"`    // 固定间隔循环（秒），0=不循环
+	CronExpr     string     `json:"cron_expr"`     // Cron 表达式循环，如 "*/5 * * * *"，优先级高于 RepeatSec
+	DependsOn    string     `json:"depends_on"`    // 依赖任务 ID，依赖完成后才执行
+	Namespace    string     `json:"namespace"`     // 租户隔离命名空间，默认 "default"
+	ScheduledAt  time.Time  `json:"scheduled_at"`  // 计划执行时间
 	StartedAt   *time.Time `json:"started_at"`   // 实际开始执行时间
 	FinishedAt  *time.Time `json:"finished_at"`  // 完成时间
 	Result      string     `json:"result"`       // 执行结果（成功时存储返回值）

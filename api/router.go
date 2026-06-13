@@ -42,6 +42,9 @@ func SetupRouter(sched *scheduler.Scheduler) *gin.Engine {
 	router.StaticFile("/index.html", "./web/index.html")
 	router.Static("/static", "./web")
 
+	// --- WebSocket 实时推送 ---
+	router.GET("/ws", func(c *gin.Context) { WsHandler(c.Writer, c.Request) })
+
 	// --- Swagger 文档 ---
 	router.StaticFile("/swagger", "./web/swagger.html")
 	router.StaticFile("/swagger.json", "./docs/swagger.json")

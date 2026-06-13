@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"task-scheduler/config"
 	"task-scheduler/worker"
 )
@@ -183,6 +184,19 @@ func (s *Scheduler) pollAndDispatch() {
 	}
 
 	for _, task := range tasks {
+		// Cron 检查：如果设置了 cron_expr 且当前时间不匹配，跳过
+		if task.CronExpr != "" {
+			if !s.shouldRunCron(task) {
+				continue
+			}
+		}
+		// DAG 依赖检查
+		if task.DependsOn != "" {
+			dep, err := s.store.GetTask(s.ctx, task.DependsOn)
+			if err != nil || dep.Status != StatusDone {
+				continue
+			}
+		}
 		// 尝试获取分布式锁，防止多节点重复执行
 		locked, err := s.store.TryLock(s.ctx, "task:"+task.ID, 60)
 		if err != nil || !locked {
@@ -212,6 +226,20 @@ func (s *Scheduler) pollAndDispatch() {
 	s.handleRetries()
 }
 
+// shouldRunCron 检查 cron 表达式是否匹配当前时间（每分钟最多触发一次）。
+func (s *Scheduler) shouldRunCron(task *Task) bool {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	schedule, err := parser.Parse(task.CronExpr)
+	if err != nil {
+		log.Printf("[Cron] 解析表达式失败: %s", task.CronExpr)
+		return false
+	}
+	// 检查当前时间是否在 cron 表达式的执行窗口内
+	now := time.Now()
+	next := schedule.Next(now.Add(-1 * time.Minute))
+	return next.Before(now) || next.Equal(now)
+}
+
 // handleRetries 检查任务执行结果，处理重试逻辑和状态更新。
 func (s *Scheduler) handleRetries() {
 	tasks, err := s.store.ListTasks(s.ctx)
@@ -220,6 +248,19 @@ func (s *Scheduler) handleRetries() {
 	}
 
 	for _, task := range tasks {
+		// Cron 检查：如果设置了 cron_expr 且当前时间不匹配，跳过
+		if task.CronExpr != "" {
+			if !s.shouldRunCron(task) {
+				continue
+			}
+		}
+		// DAG 依赖检查
+		if task.DependsOn != "" {
+			dep, err := s.store.GetTask(s.ctx, task.DependsOn)
+			if err != nil || dep.Status != StatusDone {
+				continue
+			}
+		}
 		// 释放已完成任务的锁
 		if task.IsFinished() {
 			s.runningSet.Delete(task.ID)

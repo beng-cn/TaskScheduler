@@ -648,7 +648,7 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 		if resp.StatusCode >= 400 {
 			return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(raw))
 		}
-		return fmt.Sprintf("%%d — %%s", resp.StatusCode, truncateStr(string(raw), 200)), nil
+		return fmt.Sprintf("%d — %s", resp.StatusCode, truncateStr(string(raw), 200)), nil
 	})
 
 	// 步骤5：查商品列表

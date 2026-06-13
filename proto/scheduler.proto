@@ -1,0 +1,29 @@
+// 哨兵 Sentinel gRPC 服务定义
+// 生成命令: protoc --go_out=. --go-grpc_out=. proto/scheduler.proto
+
+syntax = "proto3";
+package scheduler;
+option go_package = "task-scheduler/proto/scheduler";
+
+service TaskScheduler {
+  rpc CreateTask(CreateTaskReq) returns (TaskResp);
+  rpc GetTask(GetTaskReq) returns (TaskResp);
+  rpc ListTasks(ListTasksReq) returns (ListTasksResp);
+  rpc DeleteTask(DeleteTaskReq) returns (DeleteTaskResp);
+  rpc Health(HealthReq) returns (HealthResp);
+}
+
+message TaskResp {
+  string id = 1; string name = 2; string type = 3;
+  string status = 4; int32 retries = 5; int32 max_retries = 6;
+  string error = 7; string result = 8;
+}
+
+message CreateTaskReq { string name = 1; string type = 2; string payload = 3; }
+message GetTaskReq { string id = 1; }
+message ListTasksReq { string namespace = 1; }
+message ListTasksResp { repeated TaskResp tasks = 1; int32 total = 2; }
+message DeleteTaskReq { string id = 1; }
+message DeleteTaskResp { bool success = 1; }
+message HealthReq {}
+message HealthResp { bool ok = 1; int64 dispatched = 2; int32 running = 3; }

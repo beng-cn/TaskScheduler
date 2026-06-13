@@ -96,17 +96,22 @@ func (h *Handler) GetTask(c *gin.Context) {
 // ListTasks 列出全部任务。
 // GET /api/tasks
 func (h *Handler) ListTasks(c *gin.Context) {
+	ns := c.Query("namespace") // 多租户命名空间过滤
 	tasks, err := h.sched.ListTasks()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询任务失败: " + err.Error()})
 		return
 	}
-	if tasks == nil {
-		tasks = []*scheduler.Task{}
+	filtered := make([]*scheduler.Task, 0, len(tasks))
+	for _, t := range tasks {
+		if ns == "" || t.Namespace == ns || (ns == "default" && t.Namespace == "") {
+			filtered = append(filtered, t)
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"tasks": tasks,
-		"total": len(tasks),
+		"tasks":    filtered,
+		"total":    len(filtered),
+		"namespace": ns,
 	})
 }
 

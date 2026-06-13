@@ -121,6 +121,8 @@ func main() {
 		// 失败告警：任务失败或超时时写入错误日志 + 推送飞书通知
 		if task.Status == scheduler.StatusFailed || task.Status == scheduler.StatusTimeout {
 			notify.LogTaskError(task)
+			notify.RecordFailure(task.Name)
+			notify.LogEscalation(task.Name, notify.GetFailCount(task.Name))
 			if err := notify.SendTaskAlert(task); err != nil {
 				log.Printf("[告警] 飞书推送失败: %v", err)
 			} else {
@@ -129,6 +131,7 @@ func main() {
 		}
 		// 如果设置了循环间隔且任务成功执行，自动重新创建副本
 		if task.RepeatSec > 0 && task.Status == scheduler.StatusDone {
+			notify.ResetEscalation(task.Name)
 			clone := task.Clone()
 			clone.ID = ""
 			clone.Status = scheduler.StatusPending
