@@ -592,33 +592,34 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 	}
 
 	// 步骤2：创建商品（并解析返回的 ID）
-	var createResp string
 	RecordStep(task, "HTTP 创建商品", func() (string, error) {
 		body := fmt.Sprintf(`{"name":"哨兵测试商品-%d","category_id":1,"price":9.99,"stock":999,"keywords":"test"}`, time.Now().UnixNano()%10000)
-		var err error
-		createResp, err = httpPost(ctx, base+"/api/admin/product", token, body)
+		// 直接发请求获取完整响应体（不经过 httpPost 的截断）
+		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/api/admin/product", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return "", err
 		}
-		// 解析响应中的商品 ID
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(raw), 200))
+		}
+		// 解析 ID
 		var result struct {
 			Data struct {
 				ID int `json:"id"`
 			} `json:"data"`
 		}
-		// 从响应中提取 JSON（去掉 "200 — " 前缀和尾部 "..."）
-		jsonStr := createResp
-		for i, c := range jsonStr {
-			if c == '{' { jsonStr = jsonStr[i:]; break }
-		}
-		jsonStr = strings.TrimSuffix(jsonStr, "...")
-		if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-			log.Printf("[admin_crud] 解析商品ID失败: %v, raw: %s", err, createResp[:min(len(createResp),100)])
+		if err := json.Unmarshal(raw, &result); err != nil {
+			log.Printf("[admin_crud] 解析商品ID失败: %v", err)
 		}
 		if result.Data.ID > 0 {
 			productID = fmt.Sprintf("%d", result.Data.ID)
 		}
-		return createResp, nil
+		return fmt.Sprintf("%d — %s", resp.StatusCode, truncateStr(string(raw), 200)), nil
 	})
 
 	// 步骤3：MySQL 验证商品写入
