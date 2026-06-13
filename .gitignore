@@ -27,6 +27,7 @@ vendor/
 
 # 敏感信息备份（提交前自动生成，提交后用于恢复）
 敏感信息.txt
+git-safe-push.sh
 
 # 临时文件
 tmp/
