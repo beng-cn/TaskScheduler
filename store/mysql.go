@@ -14,13 +14,11 @@ import (
 )
 
 // MySQLStore 是基于 MySQL 的 Store 实现。
-// 任务数据持久化到磁盘，服务重启不丢失。
 type MySQLStore struct {
 	db  *sql.DB
 	seq atomic.Int64
 }
 
-// nextSeq 返回一个单调递增的序号，用于生成唯一任务 ID。
 func (m *MySQLStore) nextSeq() int64 {
 	return m.seq.Add(1)
 }
@@ -37,20 +35,19 @@ func NewMySQLStore(dsn string) (*MySQLStore, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := db.Ping(); err != nil {
-		db.Close() // 修复：Ping 失败时必须关闭连接池，避免泄漏
+		db.Close()
 		return nil, fmt.Errorf("mysql: Ping 失败: %w", err)
 	}
 
 	store := &MySQLStore{db: db}
 	if err := store.autoMigrate(); err != nil {
-		db.Close() // 修复：建表失败时也关闭连接
+		db.Close()
 		return nil, fmt.Errorf("mysql: 建表失败: %w", err)
 	}
 
 	return store, nil
 }
 
-// autoMigrate 自动创建表结构（幂等，已存在则跳过）。
 func (m *MySQLStore) autoMigrate() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS tasks (
@@ -70,11 +67,13 @@ func (m *MySQLStore) autoMigrate() error {
 			finished_at    DATETIME      NULL,
 			result         TEXT,
 			error          TEXT,
-			steps          TEXT,         -- 修复：补充 steps 列（子步骤 JSON）
+			steps          TEXT,
+			namespace      VARCHAR(64)   NOT NULL DEFAULT 'default',
 			created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			INDEX idx_status (status),
 			INDEX idx_type (type),
+			INDEX idx_namespace (namespace),
 			INDEX idx_scheduled (status, scheduled_at),
 			INDEX idx_created (created_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
@@ -101,40 +100,50 @@ func (m *MySQLStore) CreateTask(ctx context.Context, task *models.Task) error {
 	if task.Status == "" {
 		task.Status = models.StatusPending
 	}
-	// 自动生成 ID（格式: task-{毫秒时间戳}-{自增序号}，避免并发冲突）
 	if task.ID == "" {
 		task.ID = fmt.Sprintf("task-%d-%d", time.Now().UnixMilli(), m.nextSeq())
+	}
+	if task.Namespace == "" {
+		task.Namespace = "default"
 	}
 
 	stepsJSON, err := json.Marshal(task.Steps)
 	if err != nil {
 		return fmt.Errorf("mysql: 序列化 Steps 失败: %w", err)
 	}
-	// 修复：INSERT 19 列，19 个占位符（+max_latency_ms?、+steps?, 保持列数与 ? 一致）
 	_, err = m.db.ExecContext(ctx,
-		`INSERT INTO tasks (id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec, scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO tasks (id, name, type, payload, status, priority, retries, max_retries,
+		 timeout, max_latency_ms, repeat_sec, scheduled_at, started_at, finished_at,
+		 result, error, steps, namespace, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Type, task.Payload, task.Status, task.Priority,
 		task.Retries, task.MaxRetries, task.Timeout, task.MaxLatencyMs, task.RepeatSec,
 		nullTime(task.ScheduledAt), nullTimePtr(task.StartedAt), nullTimePtr(task.FinishedAt),
-		task.Result, task.Error, string(stepsJSON), task.CreatedAt, task.UpdatedAt,
+		task.Result, task.Error, string(stepsJSON), task.Namespace, task.CreatedAt, task.UpdatedAt,
 	)
 	return err
 }
 
 func (m *MySQLStore) GetTask(ctx context.Context, id string) (*models.Task, error) {
 	row := m.db.QueryRowContext(ctx,
-		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec,
-		        scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at
+		`SELECT id, name, type, payload, status, priority, retries, max_retries,
+		 timeout, max_latency_ms, repeat_sec, scheduled_at, started_at, finished_at,
+		 result, error, steps, namespace, created_at, updated_at
 		 FROM tasks WHERE id = ?`, id)
 	return scanTask(row)
 }
 
-func (m *MySQLStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec,
-		        scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at
-		 FROM tasks ORDER BY priority DESC, created_at ASC`)
+func (m *MySQLStore) ListTasks(ctx context.Context, namespace string) ([]*models.Task, error) {
+	query := `SELECT id, name, type, payload, status, priority, retries, max_retries,
+		 timeout, max_latency_ms, repeat_sec, scheduled_at, started_at, finished_at,
+		 result, error, steps, namespace, created_at, updated_at FROM tasks`
+	args := []interface{}{}
+	if namespace != "" {
+		query += " WHERE namespace = ? OR namespace = ''"
+		args = append(args, namespace)
+	}
+	query += " ORDER BY priority DESC, created_at ASC"
+	rows, err := m.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -142,13 +151,18 @@ func (m *MySQLStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
 	return scanTasks(rows)
 }
 
-func (m *MySQLStore) ListPendingTasks(ctx context.Context) ([]*models.Task, error) {
-	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec,
-		        scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at
-		 FROM tasks WHERE status = ? AND (scheduled_at IS NULL OR scheduled_at <= ?)
-		 ORDER BY priority DESC, created_at ASC`,
-		models.StatusPending, time.Now())
+func (m *MySQLStore) ListPendingTasks(ctx context.Context, namespace string) ([]*models.Task, error) {
+	query := `SELECT id, name, type, payload, status, priority, retries, max_retries,
+		 timeout, max_latency_ms, repeat_sec, scheduled_at, started_at, finished_at,
+		 result, error, steps, namespace, created_at, updated_at
+		 FROM tasks WHERE status = ? AND (scheduled_at IS NULL OR scheduled_at <= ?)`
+	args := []interface{}{models.StatusPending, time.Now()}
+	if namespace != "" {
+		query += " AND (namespace = ? OR namespace = '')"
+		args = append(args, namespace)
+	}
+	query += " ORDER BY priority DESC, created_at ASC"
+	rows, err := m.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -162,15 +176,15 @@ func (m *MySQLStore) UpdateTask(ctx context.Context, task *models.Task) error {
 	if err != nil {
 		return fmt.Errorf("mysql: 序列化 Steps 失败: %w", err)
 	}
-	// 修复：SET 子句补充 max_latency_ms=？，使 17 个 ? 全部匹配
 	_, err = m.db.ExecContext(ctx,
 		`UPDATE tasks SET name=?, type=?, payload=?, status=?, priority=?, retries=?, max_retries=?,
-		 timeout=?, max_latency_ms=?, repeat_sec=?, scheduled_at=?, started_at=?, finished_at=?, result=?, error=?, steps=?, updated_at=?
+		 timeout=?, max_latency_ms=?, repeat_sec=?, scheduled_at=?, started_at=?, finished_at=?,
+		 result=?, error=?, steps=?, namespace=?, updated_at=?
 		 WHERE id=?`,
 		task.Name, task.Type, task.Payload, task.Status, task.Priority,
 		task.Retries, task.MaxRetries, task.Timeout, task.MaxLatencyMs, task.RepeatSec,
 		nullTime(task.ScheduledAt), nullTimePtr(task.StartedAt), nullTimePtr(task.FinishedAt),
-		task.Result, task.Error, string(stepsJSON), task.UpdatedAt, task.ID,
+		task.Result, task.Error, string(stepsJSON), task.Namespace, task.UpdatedAt, task.ID,
 	)
 	return err
 }
@@ -187,18 +201,15 @@ func (m *MySQLStore) TryLock(ctx context.Context, key string, ttl int64) (bool, 
 		return false, fmt.Errorf("mysql: ttl 必须为正数，当前值: %d", ttl)
 	}
 	now := time.Now().UnixMilli()
-	// 先清理过期锁（此步骤失败不中断，继续尝试获取锁）
 	_, _ = m.db.ExecContext(ctx, `DELETE FROM locks WHERE lock_key = ? AND expiry < ?`, key, now)
-	// 尝试插入
 	_, err := m.db.ExecContext(ctx,
 		`INSERT INTO locks (lock_key, expiry) VALUES (?, ?)`,
 		key, now+ttl*1000)
 	if err != nil {
-		// 修复：区分"锁已被持有"(Duplicate Key)和真正的数据库错误
 		if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1062 {
-			return false, nil // 锁已存在，正常返回
+			return false, nil
 		}
-		return false, err // 真正的数据库错误，上报
+		return false, err
 	}
 	return true, nil
 }
@@ -219,21 +230,23 @@ func scanTask(scanner interface {
 }) (*models.Task, error) {
 	t := &models.Task{}
 	var scheduledAt, startedAt, finishedAt sql.NullTime
-	var stepsJSON sql.NullString
+	var stepsJSON, namespace sql.NullString
 	err := scanner.Scan(
 		&t.ID, &t.Name, &t.Type, &t.Payload, &t.Status, &t.Priority,
 		&t.Retries, &t.MaxRetries, &t.Timeout, &t.MaxLatencyMs, &t.RepeatSec,
 		&scheduledAt, &startedAt, &finishedAt,
-		&t.Result, &t.Error, &stepsJSON, &t.CreatedAt, &t.UpdatedAt,
+		&t.Result, &t.Error, &stepsJSON, &namespace, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if stepsJSON.Valid && stepsJSON.String != "" {
 		if err := json.Unmarshal([]byte(stepsJSON.String), &t.Steps); err != nil {
-			// 修复：反序列化失败时降级处理，记录空 Steps，不中断整个查询
 			t.Steps = nil
 		}
+	}
+	if namespace.Valid {
+		t.Namespace = namespace.String
 	}
 	if scheduledAt.Valid {
 		t.ScheduledAt = scheduledAt.Time
@@ -259,7 +272,6 @@ func scanTasks(rows *sql.Rows) ([]*models.Task, error) {
 	return tasks, rows.Err()
 }
 
-// nullTime 将零值 time.Time 转为 NULL。
 func nullTime(t time.Time) interface{} {
 	if t.IsZero() {
 		return nil
@@ -267,7 +279,6 @@ func nullTime(t time.Time) interface{} {
 	return t
 }
 
-// nullTimePtr 将 nil 指针转为 NULL。
 func nullTimePtr(t *time.Time) interface{} {
 	if t == nil {
 		return nil

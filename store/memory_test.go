@@ -47,7 +47,7 @@ func TestMemoryStore_CRUD(t *testing.T) {
 	}
 
 	// 列表
-	tasks, err := s.ListTasks(ctx)
+	tasks, err := s.ListTasks(ctx, "")
 	if err != nil {
 		t.Fatalf("列表失败: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestMemoryStore_CRUD(t *testing.T) {
 	if err := s.DeleteTask(ctx, task.ID); err != nil {
 		t.Fatalf("删除失败: %v", err)
 	}
-	tasks, _ = s.ListTasks(ctx)
+	tasks, _ = s.ListTasks(ctx, "")
 	if len(tasks) != 0 {
 		t.Errorf("删除后列表应为空: got %d", len(tasks))
 	}
@@ -79,7 +79,7 @@ func TestMemoryStore_ListPendingTasks(t *testing.T) {
 	s.CreateTask(ctx, t2)
 	s.CreateTask(ctx, t3)
 
-	pending, err := s.ListPendingTasks(ctx)
+	pending, err := s.ListPendingTasks(ctx, "")
 	if err != nil {
 		t.Fatalf("查询待执行失败: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestMemoryStore_ConcurrentSafety(t *testing.T) {
 	}
 	wg.Wait()
 
-	tasks, _ := s.ListTasks(ctx)
+	tasks, _ := s.ListTasks(ctx, "")
 	if len(tasks) != 100 {
 		t.Errorf("并发写入后任务数不对: got %d, want 100", len(tasks))
 	}

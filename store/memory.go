@@ -60,46 +60,52 @@ func (m *MemoryStore) GetTask(ctx context.Context, id string) (*models.Task, err
 	return &clone, nil
 }
 
-// ListTasks 列出全部任务。
-func (m *MemoryStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
+// ListTasks 列出全部任务。namespace 为空时返回所有任务，否则只返回指定 namespace。
+func (m *MemoryStore) ListTasks(ctx context.Context, namespace string) ([]*models.Task, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	result := make([]*models.Task, 0, len(m.tasks))
 	for _, t := range m.tasks {
+		if namespace != "" && t.Namespace != "" && t.Namespace != namespace {
+			continue
+		}
 		clone := *t
 		result = append(result, &clone)
 	}
-		// 按优先级降序（越大越优先），同优先级按创建时间升序
-		sort.Slice(result, func(i, j int) bool {
-			if result[i].Priority != result[j].Priority {
-				return result[i].Priority > result[j].Priority
-			}
-			return result[i].CreatedAt.Before(result[j].CreatedAt)
-		})
+	// 按优先级降序（越大越优先），同优先级按创建时间升序
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Priority != result[j].Priority {
+			return result[i].Priority > result[j].Priority
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
 	return result, nil
 }
 
-// ListPendingTasks 获取所有待执行的任务。
-func (m *MemoryStore) ListPendingTasks(ctx context.Context) ([]*models.Task, error) {
+// ListPendingTasks 获取所有待执行的任务。namespace 为空时返回所有任务。
+func (m *MemoryStore) ListPendingTasks(ctx context.Context, namespace string) ([]*models.Task, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	result := make([]*models.Task, 0)
 	now := time.Now()
 	for _, t := range m.tasks {
+		if namespace != "" && t.Namespace != "" && t.Namespace != namespace {
+			continue
+		}
 		if t.Status == models.StatusPending && (t.ScheduledAt.IsZero() || t.ScheduledAt.Before(now)) {
 			clone := *t
 			result = append(result, &clone)
 		}
 	}
-		// 按优先级降序（越大越优先），同优先级按创建时间升序
-		sort.Slice(result, func(i, j int) bool {
-			if result[i].Priority != result[j].Priority {
-				return result[i].Priority > result[j].Priority
-			}
-			return result[i].CreatedAt.Before(result[j].CreatedAt)
-		})
+	// 按优先级降序（越大越优先），同优先级按创建时间升序
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Priority != result[j].Priority {
+			return result[i].Priority > result[j].Priority
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
 	return result, nil
 }
 

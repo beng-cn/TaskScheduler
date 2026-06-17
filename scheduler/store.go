@@ -17,11 +17,11 @@ type Store interface {
 	// GetTask 根据 ID 查询任务。
 	GetTask(ctx context.Context, id string) (*Task, error)
 
-	// ListTasks 列出全部任务，按创建时间倒序。
-	ListTasks(ctx context.Context) ([]*Task, error)
+	// ListTasks 列出指定 namespace 的全部任务，按优先级降序、创建时间升序。
+	ListTasks(ctx context.Context, namespace string) ([]*Task, error)
 
-	// ListPendingTasks 获取所有待执行的任务。
-	ListPendingTasks(ctx context.Context) ([]*Task, error)
+	// ListPendingTasks 获取指定 namespace 的所有待执行任务。
+	ListPendingTasks(ctx context.Context, namespace string) ([]*Task, error)
 
 	// UpdateTask 更新任务（状态、结果等）。
 	UpdateTask(ctx context.Context, task *Task) error
@@ -31,8 +31,7 @@ type Store interface {
 
 	// --- 分布式锁（用于多节点部署时防止重复调度） ---
 
-	// TryLock 尝试获取一个带 TTL 的分布式锁。
-	// 返回 true 表示获取成功。
+	// TryLock 尝试获取一个带 TTL 的分布式锁。ttl 单位为秒。
 	TryLock(ctx context.Context, key string, ttl int64) (bool, error)
 
 	// Unlock 释放锁。

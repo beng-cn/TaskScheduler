@@ -103,9 +103,9 @@ func (s *Scheduler) GetTask(id string) (*Task, error) {
 	return s.store.GetTask(s.ctx, id)
 }
 
-// ListTasks 列出所有任务。
-func (s *Scheduler) ListTasks() ([]*Task, error) {
-	return s.store.ListTasks(s.ctx)
+// ListTasks 列出指定 namespace 的任务。namespace 为空时列出全部（仅限系统级操作）。
+func (s *Scheduler) ListTasks(namespace string) ([]*Task, error) {
+	return s.store.ListTasks(s.ctx, namespace)
 }
 
 // DeleteTask 删除任务。
@@ -185,7 +185,7 @@ func (s *Scheduler) checkPoolHealth() {
 
 // pollAndDispatch 查询待执行任务并分发给 Worker 池。
 func (s *Scheduler) pollAndDispatch() {
-	tasks, err := s.store.ListPendingTasks(s.ctx)
+	tasks, err := s.store.ListPendingTasks(s.ctx, "") // 空 namespace = 全量（系统级轮询）
 	if err != nil {
 		log.Printf("[Scheduler] 查询待执行任务失败: %v", err)
 		return

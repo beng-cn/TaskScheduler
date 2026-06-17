@@ -28,11 +28,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     result         TEXT                               COMMENT '执行结果（成功时）',
     error          TEXT                               COMMENT '错误信息（失败时）',
     steps          TEXT                               COMMENT '子步骤详情（JSON数组，仅多步runner填充）',
+    namespace      VARCHAR(64)   NOT NULL DEFAULT 'default' COMMENT '多租户命名空间',
     created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后更新时间',
 
     INDEX idx_status (status),
     INDEX idx_type (type),
+    INDEX idx_namespace (namespace),
     INDEX idx_scheduled (status, scheduled_at),
     INDEX idx_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务调度表';

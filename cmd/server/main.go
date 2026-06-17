@@ -82,7 +82,7 @@ func main() {
 
 	// 注入清理函数：data_clean 任务通过此回调访问存储层
 	worker.SetCleanupFunc(func(ctx context.Context) (int, error) {
-		tasks, err := taskStore.ListTasks(ctx)
+		tasks, err := taskStore.ListTasks(ctx, "") // 空 namespace = 全量清理
 		if err != nil {
 			return 0, err
 		}

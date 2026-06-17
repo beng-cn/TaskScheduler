@@ -11,6 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NamespaceKey 是 gin.Context 中存储 namespace 的键。
+const NamespaceKey = "namespace"
+
 // LoggerMiddleware 记录每个 HTTP 请求的方法、路径、状态码和耗时。
 func LoggerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -23,7 +26,7 @@ func LoggerMiddleware() gin.HandlerFunc {
 		latency := time.Since(start)
 		statusCode := c.Writer.Status()
 
-		log.Printf("[HTTP] %s %s | %d | %v", method, path, statusCode, latency)
+		log.Printf("[HTTP] %s %s | %d | %v | ns=%s", method, path, statusCode, latency, GetNamespace(c))
 	}
 }
 
@@ -44,59 +47,102 @@ func RecoveryMiddleware() gin.HandlerFunc {
 }
 
 // APIKey 是简单的 API 鉴权密钥，通过环境变量 API_KEY 设置。
-// 修复：不再硬编码默认值，开发环境可设置 API_KEY=demo-secret-key。
+// 格式：namespace:secret（多租户） 或 纯 secret（单租户，namespace 默认 "default"）。
 var APIKey = func() string {
 	if key := os.Getenv("API_KEY"); key != "" {
 		return key
 	}
-	// 默认空密钥 = 跳过鉴权（仅开发环境安全）
 	log.Println("[安全] API_KEY 环境变量未设置，鉴权已禁用（仅用于开发环境）")
 	return ""
 }()
 
-// AuthMiddleware 基于 X-API-Key 请求头的简单鉴权。
-// 如果 APIKey 为空则跳过鉴权（开发模式）。
+// parseAPIKey 解析 API Key，返回 (namespace, secret)。
+// 格式：namespace:secret → ("namespace", "secret")
+//
+//	纯 secret       → ("default", "secret")
+func parseAPIKey(key string) (string, string) {
+	if idx := strings.LastIndex(key, ":"); idx > 0 {
+		return key[:idx], key[idx+1:]
+	}
+	return "default", key
+}
+
+// GetNamespace 从 gin.Context 中获取当前请求的租户命名空间。
+func GetNamespace(c *gin.Context) string {
+	if ns, exists := c.Get(NamespaceKey); exists {
+		return ns.(string)
+	}
+	return "default"
+}
+
+// AuthMiddleware 基于 X-API-Key 请求头的鉴权 + namespace 注入。
+// 如果 APIKey 为空则跳过鉴权（开发模式），namespace 从 X-Namespace 头或默认值获取。
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 只读接口 + 前端页面不鉴权（Dashboard 需要它们来展示数据）
 		path := c.Request.URL.Path
 		method := c.Request.Method
+
+		// 只读接口 + 前端页面不鉴权
 		if path == "/api/health" || path == "/api/stats" || path == "/api/task-types" || path == "/api/error-log" ||
 			path == "/swagger" || path == "/swagger.json" ||
 			path == "/" || path == "/index.html" ||
 			strings.HasPrefix(path, "/docs/") || path == "/docs" {
+			c.Set(NamespaceKey, c.GetHeader("X-Namespace"))
 			c.Next()
 			return
 		}
 		if strings.HasPrefix(path, "/static") {
+			c.Set(NamespaceKey, c.GetHeader("X-Namespace"))
 			c.Next()
 			return
 		}
-		// WebSocket 端点单独放行（连接在 Upgrade 时有来源校验）
 		if path == "/ws" {
+			c.Set(NamespaceKey, c.GetHeader("X-Namespace"))
 			c.Next()
 			return
 		}
-		// GET /api/tasks 允许（Dashboard 实时刷新需要），POST/DELETE 需要 Key
+		// GET /api/tasks 允许，POST/DELETE 需要 Key
 		if path == "/api/tasks" && method == "GET" {
+			c.Set(NamespaceKey, c.GetHeader("X-Namespace"))
 			c.Next()
 			return
 		}
 		if strings.HasPrefix(path, "/api/tasks/") && method == "GET" {
+			c.Set(NamespaceKey, c.GetHeader("X-Namespace"))
 			c.Next()
 			return
 		}
+
+		// 开发模式：无 Key 时跳过鉴权，namespace 从请求头获取
 		if APIKey == "" {
+			ns := c.GetHeader("X-Namespace")
+			if ns == "" {
+				ns = "default"
+			}
+			c.Set(NamespaceKey, ns)
 			c.Next()
 			return
 		}
-		// 修复：仅通过 X-API-Key 请求头鉴权，移除查询参数方式
+
+		// 生产模式：验证 X-API-Key，并从中解析 namespace
 		key := c.GetHeader("X-API-Key")
-		if key != APIKey {
-			c.JSON(401, gin.H{"error": "未授权：缺少有效的 API Key"})
+		if key == "" {
+			c.JSON(401, gin.H{"error": "未授权：缺少 X-API-Key 请求头"})
 			c.Abort()
 			return
 		}
+
+		_, expectedSecret := parseAPIKey(APIKey)
+		clientNS, clientSecret := parseAPIKey(key)
+
+		if clientSecret != expectedSecret {
+			c.JSON(401, gin.H{"error": "未授权：API Key 无效"})
+			c.Abort()
+			return
+		}
+
+		// 注入 namespace 到 context（从 Key 中解析，不可伪造）
+		c.Set(NamespaceKey, clientNS)
 		c.Next()
 	}
 }
@@ -106,8 +152,7 @@ func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		// 修复：CORS 允许的头与鉴权头一致
-		c.Header("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Namespace, Authorization")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)

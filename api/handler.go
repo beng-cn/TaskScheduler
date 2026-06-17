@@ -11,7 +11,6 @@ import (
 )
 
 // Handler 是 HTTP 请求处理器。
-// 它持有调度器引用，将 HTTP 请求转换为调度器调用。
 type Handler struct {
 	sched *scheduler.Scheduler
 }
@@ -24,13 +23,13 @@ func NewHandler(sched *scheduler.Scheduler) *Handler {
 // --- 请求/响应结构体 ---
 
 type CreateTaskRequest struct {
-	Name       string `json:"name" binding:"required"` // 任务名称（必填）
-	Type       string `json:"type" binding:"required"` // 任务类型（必填）
-	Payload    string `json:"payload"`                 // 任务负载
-	Priority   int    `json:"priority"`                // 优先级
-	MaxRetries int    `json:"max_retries"`             // 最大重试次数
-	Timeout    int64  `json:"timeout"`                 // 超时时间（秒）
-	Delay      int64  `json:"delay"`                   // 延迟执行（秒）
+	Name       string `json:"name" binding:"required"`
+	Type       string `json:"type" binding:"required"`
+	Payload    string `json:"payload"`
+	Priority   int    `json:"priority"`
+	MaxRetries int    `json:"max_retries"`
+	Timeout    int64  `json:"timeout"`
+	Delay      int64  `json:"delay"`
 }
 
 // CreateTask 创建新任务。
@@ -42,7 +41,6 @@ func (h *Handler) CreateTask(c *gin.Context) {
 		return
 	}
 
-	// 修复：校验数值字段的合法性
 	if req.Delay < 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "delay 不能为负数"})
 		return
@@ -59,17 +57,15 @@ func (h *Handler) CreateTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "timeout 不能为负数"})
 		return
 	}
-	// 修复：防止 delay 和 timeout 溢出
-	if req.Delay > 31536000 { // 超过一年
+	if req.Delay > 31536000 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "delay 值过大"})
 		return
 	}
-	if req.Timeout > 86400 { // 超过一天
+	if req.Timeout > 86400 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "timeout 值过大"})
 		return
 	}
 
-	// 设置默认值
 	if req.MaxRetries == 0 {
 		req.MaxRetries = 3
 	}
@@ -86,13 +82,13 @@ func (h *Handler) CreateTask(c *gin.Context) {
 		Timeout:     req.Timeout,
 		ScheduledAt: time.Now().Add(time.Duration(req.Delay) * time.Second),
 		Status:      scheduler.StatusPending,
+		Namespace:   GetNamespace(c), // 自动填入当前租户 namespace
 	}
 
-	// 检查任务类型是否有对应的执行器
 	if runner := worker.GetRunner(task.Type); runner == nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":          "不支持的任务类型: " + task.Type,
-			"supported_types": worker.RegisteredTypes(), // 修复：动态获取支持类型
+			"supported_types": worker.RegisteredTypes(),
 		})
 		return
 	}
@@ -117,28 +113,27 @@ func (h *Handler) GetTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在: " + err.Error()})
 		return
 	}
+	// namespace 隔离校验：租户只能看自己的任务
+	ns := GetNamespace(c)
+	if task.Namespace != "" && task.Namespace != ns {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该任务"})
+		return
+	}
 	c.JSON(http.StatusOK, task)
 }
 
-// ListTasks 列出全部任务。
+// ListTasks 列出当前租户的全部任务。
 // GET /api/tasks
 func (h *Handler) ListTasks(c *gin.Context) {
-	ns := c.Query("namespace") // 多租户命名空间过滤
-	tasks, err := h.sched.ListTasks()
+	ns := GetNamespace(c)
+	tasks, err := h.sched.ListTasks(ns)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询任务失败: " + err.Error()})
 		return
 	}
-	// 修复：空 Namespace 与 "default" 分离，不混淆
-	var filtered []*scheduler.Task
-	for _, t := range tasks {
-		if ns == "" || t.Namespace == ns {
-			filtered = append(filtered, t)
-		}
-	}
 	c.JSON(http.StatusOK, gin.H{
-		"tasks":     filtered,
-		"total":     len(filtered),
+		"tasks":     tasks,
+		"total":     len(tasks),
 		"namespace": ns,
 	})
 }
@@ -147,6 +142,17 @@ func (h *Handler) ListTasks(c *gin.Context) {
 // DELETE /api/tasks/:id
 func (h *Handler) DeleteTask(c *gin.Context) {
 	id := c.Param("id")
+	// 先查出来校验 namespace 归属
+	task, err := h.sched.GetTask(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在: " + err.Error()})
+		return
+	}
+	ns := GetNamespace(c)
+	if task.Namespace != "" && task.Namespace != ns {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权删除该任务"})
+		return
+	}
 	if err := h.sched.DeleteTask(id); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "删除任务失败: " + err.Error()})
 		return
@@ -165,7 +171,7 @@ func (h *Handler) GetStats(c *gin.Context) {
 // GET /api/task-types
 func (h *Handler) GetTaskTypes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"types": worker.RegisteredTypes(), // 修复：动态获取而非硬编码
+		"types": worker.RegisteredTypes(),
 	})
 }
 

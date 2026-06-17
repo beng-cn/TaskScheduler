@@ -88,9 +88,8 @@ func (r *RedisStore) GetTask(ctx context.Context, id string) (*models.Task, erro
 	return t, nil
 }
 
-// ListTasks 列出所有任务，按优先级降序、创建时间升序。
-// 修复：排序与 MemoryStore/MySQLStore 保持一致。
-func (r *RedisStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
+// ListTasks 列出任务。namespace 为空时返回所有，否则按 namespace 过滤。
+func (r *RedisStore) ListTasks(ctx context.Context, namespace string) ([]*models.Task, error) {
 	ids, err := r.client.ZRangeByScore(ctx, "tasks:by_created", &redis.ZRangeBy{
 		Min: "-inf", Max: "+inf",
 	}).Result()
@@ -101,7 +100,17 @@ func (r *RedisStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 修复：应用层排序，与 MemoryStore 保持一致（priority DESC, created_at ASC）
+	// namespace 过滤
+	if namespace != "" {
+		filtered := make([]*models.Task, 0, len(tasks))
+		for _, t := range tasks {
+			if t.Namespace == "" || t.Namespace == namespace {
+				filtered = append(filtered, t)
+			}
+		}
+		tasks = filtered
+	}
+	// 排序：priority DESC, created_at ASC
 	sort.Slice(tasks, func(i, j int) bool {
 		if tasks[i].Priority != tasks[j].Priority {
 			return tasks[i].Priority > tasks[j].Priority
@@ -111,8 +120,8 @@ func (r *RedisStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
 	return tasks, nil
 }
 
-// ListPendingTasks 获取待执行任务。
-func (r *RedisStore) ListPendingTasks(ctx context.Context) ([]*models.Task, error) {
+// ListPendingTasks 获取待执行任务。namespace 为空时返回所有。
+func (r *RedisStore) ListPendingTasks(ctx context.Context, namespace string) ([]*models.Task, error) {
 	ids, err := r.client.SMembers(ctx, "tasks:pending").Result()
 	if err != nil {
 		return nil, err
@@ -124,11 +133,13 @@ func (r *RedisStore) ListPendingTasks(ctx context.Context) ([]*models.Task, erro
 	now := time.Now()
 	filtered := make([]*models.Task, 0, len(tasks))
 	for _, t := range tasks {
+		if namespace != "" && t.Namespace != "" && t.Namespace != namespace {
+			continue
+		}
 		if t.ScheduledAt.IsZero() || t.ScheduledAt.Before(now) {
 			filtered = append(filtered, t)
 		}
 	}
-	// 修复：排序与 MemoryStore 保持一致
 	sort.Slice(filtered, func(i, j int) bool {
 		if filtered[i].Priority != filtered[j].Priority {
 			return filtered[i].Priority > filtered[j].Priority

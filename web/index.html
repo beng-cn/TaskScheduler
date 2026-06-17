@@ -312,6 +312,9 @@
             <a class="btn" href="/swagger" target="_blank" style="text-decoration:none;">📖 API文档</a>
             <a class="btn" href="/api/error-log" target="_blank" style="text-decoration:none;">📋 错误日志</a>
             <button class="btn" onclick="refreshData()">🔄 刷新</button>
+            <label style="margin-left:12px;color:var(--text-muted);font-size:13px;">租户:</label>
+            <input type="text" id="namespace-select" value="default" onchange="onNsChange()"
+                   style="width:100px;padding:6px 10px;background:var(--card-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:13px;" placeholder="default">
             <span style="margin-left:auto;color:var(--text-muted);font-size:13px;" id="last-update"></span>
         </div>
 
@@ -393,6 +396,22 @@
             return cachedApiKey;
         }
 
+        let currentNamespace = 'default';
+
+        function onNsChange() {
+            currentNamespace = document.getElementById('namespace-select').value || 'default';
+            taskCache = {};  // 切换租户时清缓存
+            refreshData();
+        }
+
+        function getNsHeaders() {
+            var h = {};
+            var key = getApiKey();
+            if (key) h['X-API-Key'] = key;
+            h['X-Namespace'] = currentNamespace;
+            return h;
+        }
+
         let expandedTaskId = null;  // 记住当前展开的任务，刷新时保持展开
 
         // 从 URL 参数自动展开指定任务（Swagger 跳转过来时使用）
@@ -408,7 +427,7 @@
 
         function refreshData() {
             fetch(API + '/stats').then(r => r.json()).then(updateStats).catch(console.error);
-            fetch(API + '/tasks').then(r => r.json()).then(updateTaskList).catch(console.error);
+            fetch(API + '/tasks', { headers: getNsHeaders() }).then(r => r.json()).then(updateTaskList).catch(console.error);
             document.getElementById('last-update').textContent = '最后更新: ' + new Date().toLocaleTimeString();
         }
 
@@ -674,9 +693,11 @@
                 return;
             }
 
+            var hdrs = getNsHeaders();
+            hdrs['Content-Type'] = 'application/json';
             fetch(API + '/tasks', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-API-Key': getApiKey() },
+                headers: hdrs,
                 body: JSON.stringify(payload),
             }).then(r => r.json()).then(data => {
                 if (data.error) {
@@ -745,7 +766,7 @@
             if (!confirm('确认删除任务 ' + id + '？')) return;
             fetch(API + '/tasks/' + id, {
                 method: 'DELETE',
-                headers: { 'X-API-Key': getApiKey() }
+                headers: getNsHeaders()
             }).then(function(r) {
                 if (r.ok) { refreshData(); }
                 else { alert('删除失败: ' + r.status); }
