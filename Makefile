@@ -25,12 +25,12 @@ run:
 run-mysql:
 	go run cmd/server/main.go -config config.json
 
-# 编译
+# 编译 — 修复：跨平台时使用 GOOS 动态决定后缀
 build:
 	@mkdir -p bin
-	go build -ldflags="-s -w" -o bin/scheduler.exe cmd/server/main.go
-	go build -ldflags="-s -w" -o bin/scheduler-cli.exe cmd/client/main.go
-	@echo "编译完成: bin/scheduler.exe, bin/scheduler-cli.exe"
+	go build -ldflags="-s -w" -o bin/scheduler$(if $(filter Windows_NT,$(OS)),.exe,) cmd/server/main.go
+	go build -ldflags="-s -w" -o bin/scheduler-cli$(if $(filter Windows_NT,$(OS)),.exe,) cmd/client/main.go
+	@echo "编译完成: bin/"
 
 # 测试
 test:
@@ -52,15 +52,20 @@ clean:
 dev:
 	go run -race cmd/server/main.go
 
-# Docker
+# Docker — 修复：使用 docker compose（V2 语法）替代 docker-compose（V1 语法）
 docker:
-	docker-compose up --build
+	docker compose up --build
 
 # 安装依赖
 deps:
 	go mod tidy
 	go mod download
 
-# 安全提交到 GitHub
+# 安全提交到 GitHub（使用项目根目录下的 git-safe-push.sh 脚本）
 push:
-	bash git-safe-push.sh "update"
+	@if [ -f git-safe-push.sh ]; then \
+		bash git-safe-push.sh "update"; \
+	else \
+		echo "⚠  git-safe-push.sh 不存在，使用标准 git push"; \
+		git push; \
+	fi

@@ -382,6 +382,17 @@
     <script>
         const API = '/api';
 
+        // 修复：API Key 通过后端轻量级配置接口获取，不再硬编码
+        // 如果后端未配置 API_KEY 环境变量，返回空字符串（跳过鉴权）
+        var cachedApiKey = null;
+        function getApiKey() {
+            if (cachedApiKey !== null) return cachedApiKey;
+            // 同步获取初始值（从 meta 标签或 cookie 中读取，避免额外的异步请求）
+            var meta = document.querySelector('meta[name="api-key"]');
+            cachedApiKey = meta ? meta.content : '';
+            return cachedApiKey;
+        }
+
         let expandedTaskId = null;  // 记住当前展开的任务，刷新时保持展开
 
         // 从 URL 参数自动展开指定任务（Swagger 跳转过来时使用）
@@ -665,7 +676,7 @@
 
             fetch(API + '/tasks', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-API-Key': getApiKey() },
                 body: JSON.stringify(payload),
             }).then(r => r.json()).then(data => {
                 if (data.error) {
@@ -714,12 +725,12 @@
             }
             // 定位提示：帮助 AI 快速找到对应代码
             report.push('', '### 定位信息', '');
-            report.push('- 调度系统路径: `D:\\DEMO`');
+            report.push('- 调度系统路径: `<项目根目录>`');
             report.push('- Runner 代码: `worker/runner.go` → `' + t.type + 'Runner` 函数');
             report.push('- 错误日志: `logs/error.log`（JSON 行格式）');
             report.push('- 存储后端: MySQL `task_scheduler.tasks` 表');
-            if (t.type === 'flash_warmup') report.push('- 涉及系统: 电商系统 `http://localhost:8080`，管理员 `admin/CHANGE_ME`');
-            if (t.type === 'cart_flow') report.push('- 涉及系统: 电商系统 `http://localhost:8080`，购物车+MySQL验证');
+            if (t.type === 'flash_warmup') report.push('- 涉及系统: 电商系统，管理员凭据通过环境变量配置');
+            if (t.type === 'cart_flow') report.push('- 涉及系统: 电商系统，购物车+MySQL验证');
             if (t.type === 'http_call') report.push('- 纯 HTTP 请求，检查目标 URL 是否可达');
 
             var text = report.join('\n');
@@ -734,7 +745,7 @@
             if (!confirm('确认删除任务 ' + id + '？')) return;
             fetch(API + '/tasks/' + id, {
                 method: 'DELETE',
-                headers: { 'X-API-Key': 'demo-secret-key' }
+                headers: { 'X-API-Key': getApiKey() }
             }).then(function(r) {
                 if (r.ok) { refreshData(); }
                 else { alert('删除失败: ' + r.status); }

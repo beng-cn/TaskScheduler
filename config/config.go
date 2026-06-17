@@ -3,7 +3,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"time"
 )
@@ -83,6 +85,11 @@ func DefaultConfig() *Config {
 func LoadFromFile(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
+	// 修复：空路径直接返回默认配置，避免跨平台 os.ReadFile("") 行为差异
+	if path == "" {
+		return cfg, nil
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -91,9 +98,37 @@ func LoadFromFile(path string) (*Config, error) {
 		return nil, err
 	}
 
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, err
+	// 修复：使用 DisallowUnknownFields 检测 JSON 中的拼写错误
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("配置文件解析失败: %w", err)
+	}
+
+	// 修复：校验配置合法性
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("配置校验失败: %w", err)
 	}
 
 	return cfg, nil
+}
+
+// Validate 校验配置的合法性，防止非法值导致运行时错误。
+func (c *Config) Validate() error {
+	if c.Server.Port <= 0 || c.Server.Port > 65535 {
+		return fmt.Errorf("server.port 必须在 1-65535 之间，当前值: %d", c.Server.Port)
+	}
+	if c.Scheduler.PollInterval <= 0 {
+		return fmt.Errorf("scheduler.poll_interval 必须大于 0")
+	}
+	if c.Worker.Count <= 0 {
+		return fmt.Errorf("worker.count 必须大于 0")
+	}
+	if c.Worker.QueueSize <= 0 {
+		return fmt.Errorf("worker.queue_size 必须大于 0")
+	}
+	if c.Store.Type != "" && c.Store.Type != "memory" && c.Store.Type != "mysql" && c.Store.Type != "redis" {
+		return fmt.Errorf("store.type 必须是 memory/mysql/redis 之一，当前值: %s", c.Store.Type)
+	}
+	return nil
 }

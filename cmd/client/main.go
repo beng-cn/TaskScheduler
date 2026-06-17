@@ -18,9 +18,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
-const defaultServer = "http://localhost:8080"
+// 修复：默认端口 8888 与服务端默认端口一致
+const defaultServer = "http://localhost:8888"
+
+// 修复：使用带超时的 HTTP 客户端
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -73,14 +78,7 @@ func printUsage() {
 }
 
 func cmdCreate(server string) {
-	name := flag.Lookup("name")
-	taskType := flag.Lookup("type")
-	payload := flag.Lookup("payload")
-	delay := flag.Lookup("delay")
-	retry := flag.Lookup("retry")
-	timeout := flag.Lookup("timeout")
-
-	// 解析子命令参数
+	// 修复：移除废弃的 flag.Lookup 代码
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 	n := fs.String("name", "", "任务名称")
 	t := fs.String("type", "", "任务类型")
@@ -93,12 +91,6 @@ func cmdCreate(server string) {
 	if *n == "" || *t == "" {
 		log.Fatal("必须指定 -name 和 -type 参数")
 	}
-	_ = name
-	_ = taskType
-	_ = payload
-	_ = delay
-	_ = retry
-	_ = timeout
 
 	body := map[string]interface{}{
 		"name":        *n,
@@ -108,9 +100,13 @@ func cmdCreate(server string) {
 		"max_retries": *r,
 		"timeout":     *to,
 	}
-	data, _ := json.Marshal(body)
+	data, err := json.Marshal(body)
+	if err != nil {
+		log.Fatalf("序列化请求失败: %v", err)
+	}
 
-	resp, err := http.Post(server+"/api/tasks", "application/json", bytes.NewReader(data))
+	// 修复：使用带超时的 httpClient
+	resp, err := httpClient.Post(server+"/api/tasks", "application/json", bytes.NewReader(data))
 	if err != nil {
 		log.Fatalf("请求失败: %v", err)
 	}
@@ -120,7 +116,7 @@ func cmdCreate(server string) {
 }
 
 func cmdList(server string) {
-	resp, err := http.Get(server + "/api/tasks")
+	resp, err := httpClient.Get(server + "/api/tasks")
 	if err != nil {
 		log.Fatalf("请求失败: %v", err)
 	}
@@ -129,17 +125,15 @@ func cmdList(server string) {
 }
 
 func cmdGet(server string) {
-	id := flag.Lookup("id")
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
 	i := fs.String("id", "", "任务ID")
 	fs.Parse(os.Args[2:])
-	_ = id
 
 	if *i == "" {
 		log.Fatal("必须指定 -id 参数")
 	}
 
-	resp, err := http.Get(server + "/api/tasks/" + *i)
+	resp, err := httpClient.Get(server + "/api/tasks/" + *i)
 	if err != nil {
 		log.Fatalf("请求失败: %v", err)
 	}
@@ -156,8 +150,11 @@ func cmdDelete(server string) {
 		log.Fatal("必须指定 -id 参数")
 	}
 
-	req, _ := http.NewRequest("DELETE", server+"/api/tasks/"+*i, nil)
-	resp, err := http.DefaultClient.Do(req)
+	req, err := http.NewRequest("DELETE", server+"/api/tasks/"+*i, nil)
+	if err != nil {
+		log.Fatalf("构造请求失败: %v", err)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Fatalf("请求失败: %v", err)
 	}
@@ -166,7 +163,7 @@ func cmdDelete(server string) {
 }
 
 func cmdStats(server string) {
-	resp, err := http.Get(server + "/api/stats")
+	resp, err := httpClient.Get(server + "/api/stats")
 	if err != nil {
 		log.Fatalf("请求失败: %v", err)
 	}
@@ -175,7 +172,7 @@ func cmdStats(server string) {
 }
 
 func cmdHealth(server string) {
-	resp, err := http.Get(server + "/api/health")
+	resp, err := httpClient.Get(server + "/api/health")
 	if err != nil {
 		log.Fatalf("请求失败: %v", err)
 	}
@@ -184,7 +181,7 @@ func cmdHealth(server string) {
 }
 
 func cmdTypes(server string) {
-	resp, err := http.Get(server + "/api/task-types")
+	resp, err := httpClient.Get(server + "/api/task-types")
 	if err != nil {
 		log.Fatalf("请求失败: %v", err)
 	}
@@ -193,7 +190,10 @@ func cmdTypes(server string) {
 }
 
 func printResponse(resp *http.Response) {
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("读取响应失败: %v", err)
+	}
 	var pretty bytes.Buffer
 	if err := json.Indent(&pretty, data, "", "  "); err != nil {
 		fmt.Println(string(data))

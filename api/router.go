@@ -1,6 +1,9 @@
 package api
 
 import (
+	"os"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"task-scheduler/scheduler"
 )
@@ -38,8 +41,9 @@ func SetupRouter(sched *scheduler.Scheduler) *gin.Engine {
 	}
 
 	// --- 前端静态文件 ---
-	router.StaticFile("/", "./web/index.html")
-	router.StaticFile("/index.html", "./web/index.html")
+	// 修复：通过 handler 注入 API Key 的 meta 标签，确保前端 getApiKey() 能获取到
+	router.GET("/", serveIndexWithAPIKey)
+	router.GET("/index.html", serveIndexWithAPIKey)
 	router.Static("/static", "./web")
 
 	// --- WebSocket 实时推送 ---
@@ -51,4 +55,23 @@ func SetupRouter(sched *scheduler.Scheduler) *gin.Engine {
 	router.Static("/docs", "./docs")
 
 	return router
+}
+
+// serveIndexWithAPIKey 读取 index.html 并在 <head> 中注入 API Key 的 meta 标签。
+// 确保前端 getApiKey() 能正确获取密钥。
+func serveIndexWithAPIKey(c *gin.Context) {
+	data, err := os.ReadFile("./web/index.html")
+	if err != nil {
+		c.String(500, "无法加载 Dashboard")
+		return
+	}
+
+	html := string(data)
+
+	// 在 </head> 之前注入 meta 标签，使 getApiKey() 能读取
+	metaTag := `<meta name="api-key" content="` + APIKey + `">`
+	html = strings.Replace(html, "</head>", metaTag+"\n</head>", 1)
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(200, html)
 }

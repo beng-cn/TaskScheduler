@@ -88,7 +88,7 @@ func (m *MemoryStore) ListPendingTasks(ctx context.Context) ([]*models.Task, err
 	result := make([]*models.Task, 0)
 	now := time.Now()
 	for _, t := range m.tasks {
-		if t.Status == models.StatusPending && t.ScheduledAt.Before(now) {
+		if t.Status == models.StatusPending && (t.ScheduledAt.IsZero() || t.ScheduledAt.Before(now)) {
 			clone := *t
 			result = append(result, &clone)
 		}
@@ -133,7 +133,11 @@ func (m *MemoryStore) DeleteTask(ctx context.Context, id string) error {
 }
 
 // TryLock 尝试获取锁。
+// 修复：校验 ttl 正值，与 RedisStore 行为一致。
 func (m *MemoryStore) TryLock(ctx context.Context, key string, ttl int64) (bool, error) {
+	if ttl <= 0 {
+		return false, fmt.Errorf("memory: ttl 必须为正数，当前值: %d", ttl)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

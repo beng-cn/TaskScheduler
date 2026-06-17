@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"sync/atomic"
 	"task-scheduler/models"
@@ -27,11 +28,14 @@ func (r *RedisStore) nextSeq() int64 {
 // NewRedisStore 创建一个新的 Redis 存储实例。
 func NewRedisStore(addr, password string, db int) (*RedisStore, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       db,
+		Addr:         addr,
+		Password:     password,
+		DB:           db,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
 	})
 	if err := client.Ping(context.Background()).Err(); err != nil {
+		client.Close() // 修复：Ping 失败时关闭连接，避免泄漏
 		return nil, fmt.Errorf("redis: 连接失败: %w", err)
 	}
 	return &RedisStore{client: client}, nil
@@ -61,6 +65,10 @@ func (r *RedisStore) CreateTask(ctx context.Context, task *models.Task) error {
 		pipe.SAdd(ctx, "tasks:pending", task.ID)
 	}
 	_, err = pipe.Exec(ctx)
+	// 修复：Pipeline 失败时记录日志（部分命令可能成功，属于尽力而为语义）
+	if err != nil {
+		log.Printf("[RedisStore] CreateTask Pipeline 执行失败: %v", err)
+	}
 	return err
 }
 
@@ -80,7 +88,8 @@ func (r *RedisStore) GetTask(ctx context.Context, id string) (*models.Task, erro
 	return t, nil
 }
 
-// ListTasks 列出所有任务，按创建时间升序。
+// ListTasks 列出所有任务，按优先级降序、创建时间升序。
+// 修复：排序与 MemoryStore/MySQLStore 保持一致。
 func (r *RedisStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
 	ids, err := r.client.ZRangeByScore(ctx, "tasks:by_created", &redis.ZRangeBy{
 		Min: "-inf", Max: "+inf",
@@ -88,7 +97,18 @@ func (r *RedisStore) ListTasks(ctx context.Context) ([]*models.Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.getTasksByIDs(ctx, ids)
+	tasks, err := r.getTasksByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	// 修复：应用层排序，与 MemoryStore 保持一致（priority DESC, created_at ASC）
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].Priority != tasks[j].Priority {
+			return tasks[i].Priority > tasks[j].Priority
+		}
+		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+	})
+	return tasks, nil
 }
 
 // ListPendingTasks 获取待执行任务。
@@ -108,7 +128,11 @@ func (r *RedisStore) ListPendingTasks(ctx context.Context) ([]*models.Task, erro
 			filtered = append(filtered, t)
 		}
 	}
+	// 修复：排序与 MemoryStore 保持一致
 	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Priority != filtered[j].Priority {
+			return filtered[i].Priority > filtered[j].Priority
+		}
 		return filtered[i].CreatedAt.Before(filtered[j].CreatedAt)
 	})
 	return filtered, nil
@@ -129,6 +153,9 @@ func (r *RedisStore) UpdateTask(ctx context.Context, task *models.Task) error {
 		pipe.SRem(ctx, "tasks:pending", task.ID)
 	}
 	_, err = pipe.Exec(ctx)
+	if err != nil {
+		log.Printf("[RedisStore] UpdateTask Pipeline 执行失败: %v", err)
+	}
 	return err
 }
 
@@ -139,11 +166,18 @@ func (r *RedisStore) DeleteTask(ctx context.Context, id string) error {
 	pipe.ZRem(ctx, "tasks:by_created", id)
 	pipe.SRem(ctx, "tasks:pending", id)
 	_, err := pipe.Exec(ctx)
+	if err != nil {
+		log.Printf("[RedisStore] DeleteTask Pipeline 执行失败: %v", err)
+	}
 	return err
 }
 
 // TryLock 尝试获取分布式锁（SETNX + TTL）。
+// 修复：校验 ttl 正值
 func (r *RedisStore) TryLock(ctx context.Context, key string, ttl int64) (bool, error) {
+	if ttl <= 0 {
+		return false, fmt.Errorf("redis: ttl 必须为正数，当前值: %d", ttl)
+	}
 	ok, err := r.client.SetNX(ctx, "lock:"+key, 1, time.Duration(ttl)*time.Second).Result()
 	return ok, err
 }
@@ -172,12 +206,20 @@ func (r *RedisStore) getTasksByIDs(ctx context.Context, ids []string) ([]*models
 		return nil, err
 	}
 	tasks := make([]*models.Task, 0, len(vals))
-	for _, v := range vals {
+	for i, v := range vals {
 		if v == nil {
 			continue
 		}
+		// 修复：使用安全断言，避免非 string 类型导致 panic
+		s, ok := v.(string)
+		if !ok {
+			log.Printf("[RedisStore] key %s 的值类型异常，已跳过", keys[i])
+			continue
+		}
 		t := &models.Task{}
-		if err := json.Unmarshal([]byte(v.(string)), t); err != nil {
+		if err := json.Unmarshal([]byte(s), t); err != nil {
+			// 修复：记录日志而非静默跳过
+			log.Printf("[RedisStore] 任务 %s 反序列化失败: %v", ids[i], err)
 			continue
 		}
 		tasks = append(tasks, t)

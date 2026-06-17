@@ -3,6 +3,7 @@
 package notify
 
 import (
+	"bufio"
 	"encoding/json"
 	"log"
 	"os"
@@ -13,13 +14,13 @@ import (
 
 // ErrorEntry 是一条错误日志记录。
 type ErrorEntry struct {
-	Time      string `json:"time"`       // 发生时间
-	TaskID    string `json:"task_id"`    // 任务 ID
-	TaskName  string `json:"task_name"`  // 任务名称
-	TaskType  string `json:"task_type"`  // 任务类型
-	Status    string `json:"status"`     // 最终状态
-	Retries   int    `json:"retries"`    // 重试次数
-	Error     string `json:"error"`      // 错误信息
+	Time     string `json:"time"`      // 发生时间
+	TaskID   string `json:"task_id"`   // 任务 ID
+	TaskName string `json:"task_name"` // 任务名称
+	TaskType string `json:"task_type"` // 任务类型
+	Status   string `json:"status"`    // 最终状态
+	Retries  int    `json:"retries"`   // 重试次数
+	Error    string `json:"error"`     // 错误信息
 }
 
 var (
@@ -32,7 +33,9 @@ func InitErrorLog(path string) {
 	errorLogPath = path
 	// 确保目录存在
 	if dir := filepathDir(path); dir != "" {
-		os.MkdirAll(dir, 0755)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("[ErrorLog] 创建日志目录失败: %v", err)
+		}
 	}
 	// 启动时清理超过 7 天的记录
 	CleanOldEntries()
@@ -73,12 +76,19 @@ func LogTaskError(task *models.Task) {
 	}
 	defer f.Close()
 
-	data, _ := json.Marshal(entry)
-	f.Write(append(data, '\n'))
+	data, err := json.Marshal(entry)
+	if err != nil {
+		log.Printf("[ErrorLog] 序列化日志条目失败: %v", err)
+		return
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		log.Printf("[ErrorLog] 写入日志失败: %v", err)
+	}
 }
 
 // CleanOldEntries 删除超过 7 天的错误日志条目。
-// 由于日志是追加写入的（按时间顺序），逐行检查并重写即可。
+// 使用 bufio.Scanner 替代手写行解析，避免末行丢失和首行跳过问题。
+// 修复：写临时文件失败时不会覆盖原文件。
 func CleanOldEntries() {
 	if errorLogPath == "" {
 		return
@@ -87,50 +97,84 @@ func CleanOldEntries() {
 	logMu.Lock()
 	defer logMu.Unlock()
 
-	data, err := os.ReadFile(errorLogPath)
+	// 检查文件是否存在
+	info, err := os.Stat(errorLogPath)
 	if err != nil {
 		return // 文件不存在，跳过
 	}
+	if info.Size() == 0 {
+		return
+	}
 
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
-	lines := 0
-	kept := 0
 
-	// 逐行解析，只保留 7 天内的记录
-	f, err := os.Create(errorLogPath + ".tmp")
+	// 先读原文件
+	inFile, err := os.Open(errorLogPath)
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer inFile.Close()
 
-	for len(data) > 0 {
-		idx := 0
-		for i, b := range data {
-			if b == '\n' {
-				idx = i
-				break
-			}
-		}
-		if idx == 0 {
-			break
-		}
-		line := data[:idx]
-		data = data[idx+1:]
+	// 写临时文件
+	tmpPath := errorLogPath + ".tmp"
+	outFile, err := os.Create(tmpPath)
+	if err != nil {
+		return
+	}
+
+	scanner := bufio.NewScanner(inFile)
+	lines := 0
+	kept := 0
+	writeFailed := false
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
 		lines++
 
 		var entry ErrorEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
+			continue // 跳过非法行
 		}
 		t, err := time.Parse("2006-01-02 15:04:05", entry.Time)
 		if err != nil || t.Before(cutoff) {
 			continue // 过期，跳过
 		}
-		f.Write(append(line, '\n'))
+		if _, err := outFile.Write(append(line, '\n')); err != nil {
+			// 修复：写失败时标记失败，放弃临时文件，保留原文件不动
+			log.Printf("[ErrorLog] 写入临时文件失败: %v", err)
+			writeFailed = true
+			break
+		}
 		kept++
 	}
 
-	os.Rename(errorLogPath+".tmp", errorLogPath)
+	// 修复：确保 Close 错误也被检查（数据落盘）
+	if !writeFailed {
+		if err := outFile.Close(); err != nil {
+			log.Printf("[ErrorLog] 关闭临时文件失败: %v", err)
+			writeFailed = true
+		}
+	} else {
+		outFile.Close()
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("[ErrorLog] 扫描日志文件出错: %v", err)
+		writeFailed = true
+	}
+
+	if writeFailed {
+		os.Remove(tmpPath)
+		return
+	}
+
+	// 修复：检查 Rename 错误
+	if err := os.Rename(tmpPath, errorLogPath); err != nil {
+		log.Printf("[ErrorLog] 重命名临时文件失败: %v", err)
+		os.Remove(tmpPath)
+		return
+	}
+
 	if lines > kept {
 		log.Printf("[ErrorLog] 清理了 %d 条过期错误记录（保留 %d 条）", lines-kept, kept)
 	}
@@ -142,6 +186,7 @@ func GetErrorLogPath() string {
 }
 
 // ReadErrorLog 读取全部错误日志条目。
+// 使用 bufio.Scanner 替代手写行解析。
 func ReadErrorLog() ([]ErrorEntry, error) {
 	if errorLogPath == "" {
 		return []ErrorEntry{}, nil
@@ -150,31 +195,22 @@ func ReadErrorLog() ([]ErrorEntry, error) {
 	logMu.Lock()
 	defer logMu.Unlock()
 
-	data, err := os.ReadFile(errorLogPath)
+	file, err := os.Open(errorLogPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []ErrorEntry{}, nil
 		}
 		return nil, err
 	}
+	defer file.Close()
 
 	var entries []ErrorEntry
-	for len(data) > 0 {
-		idx := 0
-		for i, b := range data {
-			if b == '\n' {
-				idx = i
-				break
-			}
-		}
-		if idx == 0 {
-			break
-		}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
 		var entry ErrorEntry
-		if err := json.Unmarshal(data[:idx], &entry); err == nil {
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err == nil {
 			entries = append(entries, entry)
 		}
-		data = data[idx+1:]
 	}
-	return entries, nil
+	return entries, scanner.Err()
 }

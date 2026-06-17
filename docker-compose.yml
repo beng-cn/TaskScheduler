@@ -1,7 +1,7 @@
 # TaskScheduler Docker Compose 配置
-# 启动方式: docker-compose up -d
-# 查看日志: docker-compose logs -f
-# 停止: docker-compose down
+# 启动方式: docker compose up -d
+# 查看日志: docker compose logs -f
+# 停止: docker compose down
 
 version: "3.8"
 
@@ -11,7 +11,8 @@ services:
     container_name: task-scheduler
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # 修复：应用监听 8888，映射主机 8888 到容器 8888
+      - "8888:8888"
     environment:
       - GIN_MODE=release
     # 如果需要使用 Redis（可选扩展）:

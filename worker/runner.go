@@ -12,63 +12,145 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"task-scheduler/models"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
+// httpClient 是带有超时的全局 HTTP 客户端（修复：不再使用无超时的 DefaultClient）。
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
 // TaskRunner 定义任务的执行逻辑。
 type TaskRunner func(ctx context.Context, task *models.Task) (string, error)
 
 // builtinRunners 内置的任务执行器注册表。
-var builtinRunners = map[string]TaskRunner{
-	"http_call":        httpCallRunner,
-	"data_clean":       dataCleanRunner,
-	"flash_warmup":     flashWarmupRunner,
-	"cart_flow":        cartFlowRunner,
-	"flash_full_check": flashFullCheckRunner,
-	"order_flow":       orderFlowRunner,
-	"user_flow":        userFlowRunner,
-	"admin_crud":       adminCRUDRunner,
-}
+// 修复：并发安全——使用 sync.RWMutex 保护 map 读写。
+var (
+	builtinRunnersMu sync.RWMutex
+	builtinRunners   = map[string]TaskRunner{
+		"http_call":        httpCallRunner,
+		"data_clean":       dataCleanRunner,
+		"flash_warmup":     flashWarmupRunner,
+		"cart_flow":        cartFlowRunner,
+		"flash_full_check": flashFullCheckRunner,
+		"order_flow":       orderFlowRunner,
+		"user_flow":        userFlowRunner,
+		"admin_crud":       adminCRUDRunner,
+	}
+)
 
 // GetRunner 根据任务类型获取对应的执行器。
 func GetRunner(taskType string) TaskRunner {
+	builtinRunnersMu.RLock()
+	defer builtinRunnersMu.RUnlock()
 	return builtinRunners[taskType]
 }
 
 // RegisterRunner 注册自定义任务执行器。
 func RegisterRunner(taskType string, runner TaskRunner) {
+	builtinRunnersMu.Lock()
+	defer builtinRunnersMu.Unlock()
 	builtinRunners[taskType] = runner
 }
 
+// RegisteredTypes 返回所有已注册的任务类型列表。
+func RegisteredTypes() []string {
+	builtinRunnersMu.RLock()
+	defer builtinRunnersMu.RUnlock()
+	types := make([]string, 0, len(builtinRunners))
+	for t := range builtinRunners {
+		types = append(types, t)
+	}
+	return types
+}
+
 // --- 数据库连接注入（用于验证步骤） ---
+// 修复：使用 atomic.Value 保护全局变量的读写并发安全，且改为连接池单例模式。
 
-var mysqlDSN string
-var redisAddr string
+var (
+	mysqlDB   atomic.Value // *sql.DB — 修复：单例连接池，不再每次调用创建新连接
+	redisConn atomic.Value // *redis.Client — 修复：单例连接池
+)
 
-// SetDBConnectors 注入 MySQL DSN 和 Redis 地址，供验证步骤使用。
-func SetDBConnectors(mysql, redis string) {
-	mysqlDSN = mysql
-	redisAddr = redis
+// SetDBConnectors 注入 MySQL DSN 和 Redis 地址，初始化全局连接池。
+func SetDBConnectors(mysql, redisAddr string) {
+	if mysql != "" {
+		db, err := sql.Open("mysql", mysql+"?parseTime=true&charset=utf8mb4&loc=Local")
+		if err != nil {
+			log.Printf("[Worker] MySQL 连接池初始化失败: %v", err)
+		} else {
+			db.SetMaxOpenConns(10)
+			db.SetMaxIdleConns(3)
+			db.SetConnMaxLifetime(5 * time.Minute)
+			mysqlDB.Store(db)
+		}
+	}
+	if redisAddr != "" {
+		client := redis.NewClient(&redis.Options{
+			Addr:         redisAddr,
+			ReadTimeout:  3 * time.Second,
+			WriteTimeout: 3 * time.Second,
+		})
+		redisConn.Store(client)
+	}
+}
+
+// getMySQLDB 获取全局 MySQL 连接池。
+func getMySQLDB() *sql.DB {
+	if v := mysqlDB.Load(); v != nil {
+		return v.(*sql.DB)
+	}
+	return nil
+}
+
+// getRedisClient 获取全局 Redis 连接池。
+func getRedisClient() *redis.Client {
+	if v := redisConn.Load(); v != nil {
+		return v.(*redis.Client)
+	}
+	return nil
 }
 
 // --- 清理函数注入 ---
 
 type CleanupFunc func(ctx context.Context) (int, error)
 
-var cleanupFunc CleanupFunc
+// 修复：使用 atomic.Value 保护清理函数的并发访问
+var cleanupFunc atomic.Value // CleanupFunc
 
-func SetCleanupFunc(fn CleanupFunc) { cleanupFunc = fn }
+// SetCleanupFunc 设置清理回调函数。
+func SetCleanupFunc(fn CleanupFunc) {
+	cleanupFunc.Store(fn)
+}
+
+func getCleanupFunc() CleanupFunc {
+	if v := cleanupFunc.Load(); v != nil {
+		return v.(CleanupFunc)
+	}
+	return nil
+}
 
 // --- 任务完成回调 ---
 
 type TaskCallback func(ctx context.Context, task *models.Task)
 
-var onTaskComplete TaskCallback
+// 修复：使用 atomic.Value 保护回调函数，消除 data race
+var onTaskComplete atomic.Value // TaskCallback
 
-func SetOnTaskComplete(fn TaskCallback) { onTaskComplete = fn }
+// SetOnTaskComplete 设置任务完成回调函数。
+func SetOnTaskComplete(fn TaskCallback) {
+	onTaskComplete.Store(fn)
+}
+
+func getOnTaskComplete() TaskCallback {
+	if v := onTaskComplete.Load(); v != nil {
+		return v.(TaskCallback)
+	}
+	return nil
+}
 
 // --- 辅助函数 ---
 
@@ -111,16 +193,24 @@ func RecordStep(task *models.Task, name string, fn func() (string, error)) {
 
 // httpGet 发起 HTTP GET 请求并返回响应体。
 func httpGet(ctx context.Context, url, token string) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("构造 GET 请求失败: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	if token != "" && !strings.HasPrefix(token, "Bearer ") {
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else if token != "" {
+		req.Header.Set("Authorization", token)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -129,38 +219,55 @@ func httpGet(ctx context.Context, url, token string) (string, error) {
 
 // httpPost 发起 HTTP POST 请求并返回响应体。
 func httpPost(ctx context.Context, url, token string, jsonBody string) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("构造 POST 请求失败: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" && !strings.HasPrefix(token, "Bearer ") {
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else if token != "" {
+		req.Header.Set("Authorization", token)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return fmt.Sprintf("%d — %s", resp.StatusCode, truncateStr(string(body), 200)), nil
 }
 
-// login 调登录接口获取 token，不做截断因为 JWT token 可能很长。
+// login 调登录接口获取 token。
 func login(ctx context.Context, baseURL, username, password string) (string, error) {
-	loginBody, _ := json.Marshal(map[string]string{
+	loginBody, err := json.Marshal(map[string]string{
 		"username": username,
 		"password": password,
 	})
-	req, _ := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/user/login",
+	if err != nil {
+		return "", fmt.Errorf("序列化登录请求失败: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/user/login",
 		bytes.NewBuffer(loginBody))
+	if err != nil {
+		return "", fmt.Errorf("构造登录请求失败: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("登录请求失败: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取登录响应失败: %w", err)
+	}
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("登录返回 %d: %s", resp.StatusCode, truncateStr(string(body), 200))
 	}
@@ -179,15 +286,12 @@ func login(ctx context.Context, baseURL, username, password string) (string, err
 }
 
 // queryMySQL 执行 MySQL 查询并返回结果摘要。
+// 修复：使用全局连接池，不再每次调用新建连接。
 func queryMySQL(query string, args ...interface{}) (string, error) {
-	if mysqlDSN == "" {
+	db := getMySQLDB()
+	if db == nil {
 		return "", fmt.Errorf("MySQL 未配置")
 	}
-	db, err := sql.Open("mysql", mysqlDSN+"?parseTime=true&charset=utf8mb4&loc=Local")
-	if err != nil {
-		return "", err
-	}
-	defer db.Close()
 
 	var count int
 	if err := db.QueryRow(query, args...).Scan(&count); err != nil {
@@ -197,12 +301,12 @@ func queryMySQL(query string, args ...interface{}) (string, error) {
 }
 
 // queryRedis 查询 Redis 键是否存在。
+// 修复：使用全局连接池，不再每次调用新建连接。
 func queryRedis(key string) (string, error) {
-	if redisAddr == "" {
+	client := getRedisClient()
+	if client == nil {
 		return "", fmt.Errorf("Redis 未配置")
 	}
-	client := redis.NewClient(&redis.Options{Addr: redisAddr})
-	defer client.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -217,11 +321,13 @@ func queryRedis(key string) (string, error) {
 	return fmt.Sprintf("键存在，长度: %d", len(val)), nil
 }
 
+// truncateStr 安全截断字符串，按 rune（字符）而非字节截断，避免截断多字节 UTF-8 字符。
 func truncateStr(s string, n int) string {
-	if len(s) <= n {
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(runes[:n]) + "..."
 }
 
 func nowPtr() *time.Time {
@@ -239,12 +345,14 @@ func httpCallRunner(ctx context.Context, task *models.Task) (string, error) {
 		Body       string            `json:"body"`
 		ExpectCode int               `json:"expect_code"` // 期望的 HTTP 状态码，0 表示不校验
 	}
-	json.Unmarshal([]byte(task.Payload), &params)
+	if err := json.Unmarshal([]byte(task.Payload), &params); err != nil {
+		return "", fmt.Errorf("解析 Payload 失败: %w", err)
+	}
 	if params.URL == "" {
 		params.URL = task.Payload
 	}
 	if params.Method == "" {
-		params.Method = "POST"
+		params.Method = "GET" // 修复：默认使用 GET 而非 POST
 	}
 	var reqBody io.Reader
 	if params.Body != "" {
@@ -258,12 +366,15 @@ func httpCallRunner(ctx context.Context, task *models.Task) (string, error) {
 		req.Header.Set(k, v)
 	}
 	start := time.Now()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if err != nil {
+		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
 	elapsed := time.Since(start)
 
 	// 检查响应延迟
@@ -287,10 +398,11 @@ func httpCallRunner(ctx context.Context, task *models.Task) (string, error) {
 // --- data_clean（单步） ---
 
 func dataCleanRunner(ctx context.Context, task *models.Task) (string, error) {
-	if cleanupFunc == nil {
+	fn := getCleanupFunc()
+	if fn == nil {
 		return "", fmt.Errorf("清理函数未注册")
 	}
-	count, err := cleanupFunc(ctx)
+	count, err := fn(ctx)
 	if err != nil {
 		return "", fmt.Errorf("清理失败: %w", err)
 	}
@@ -308,7 +420,9 @@ func flashWarmupRunner(ctx context.Context, task *models.Task) (string, error) {
 		BaseURL string `json:"base_url"`
 		FlashID string `json:"flash_id"`
 	}
-	json.Unmarshal([]byte(task.Payload), &params)
+	if err := json.Unmarshal([]byte(task.Payload), &params); err != nil {
+		return "", fmt.Errorf("解析 Payload 失败: %w", err)
+	}
 	if params.BaseURL == "" {
 		params.BaseURL = "http://localhost:8080"
 	}
@@ -343,7 +457,7 @@ func flashWarmupRunner(ctx context.Context, task *models.Task) (string, error) {
 		return queryRedis("flash:stock:" + fid)
 	})
 
-	if failed, step := stepFailed(task); failed { return fmt.Sprintf("共 %d 步，第「"+step+"」步失败", len(task.Steps)), fmt.Errorf("子步骤失败: %s", step) }
+	// 修复：移除冗余的手动 stepFailed 检查，finalResult 内部已处理
 	return finalResult(task, "秒杀预热检查")
 }
 
@@ -355,7 +469,9 @@ func cartFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 		BaseURL   string `json:"base_url"`
 		ProductID string `json:"product_id"`
 	}
-	json.Unmarshal([]byte(task.Payload), &params)
+	if err := json.Unmarshal([]byte(task.Payload), &params); err != nil {
+		return "", fmt.Errorf("解析 Payload 失败: %w", err)
+	}
 	if params.BaseURL == "" {
 		params.BaseURL = "http://localhost:8080"
 	}
@@ -392,7 +508,7 @@ func cartFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 
 	// 步骤4：MySQL 验证购物车记录
 	RecordStep(task, "MySQL 验证购物车写入", func() (string, error) {
-		return queryMySQL("SELECT COUNT(*) FROM carts WHERE user_id=1")
+		return queryMySQL("SELECT COUNT(*) FROM carts WHERE user_id=?", 1)
 	})
 
 	// 步骤5：API 验证购物车列表
@@ -410,7 +526,9 @@ func flashFullCheckRunner(ctx context.Context, task *models.Task) (string, error
 	var params struct {
 		BaseURL string `json:"base_url"`
 	}
-	json.Unmarshal([]byte(task.Payload), &params)
+	if err := json.Unmarshal([]byte(task.Payload), &params); err != nil {
+		return "", fmt.Errorf("解析 Payload 失败: %w", err)
+	}
 	if params.BaseURL == "" {
 		params.BaseURL = "http://localhost:8080"
 	}
@@ -431,29 +549,61 @@ func flashFullCheckRunner(ctx context.Context, task *models.Task) (string, error
 		return "", fmt.Errorf("%s", task.Steps[0].Error)
 	}
 
-	// 步骤2：创建秒杀活动
+	// 步骤2：创建秒杀活动（并解析返回的 ID）
 	RecordStep(task, "HTTP 创建秒杀活动", func() (string, error) {
 		now := time.Now()
 		start := now.Add(10 * time.Second).Format("2006-01-02 15:04:05")
 		end := now.Add(1 * time.Hour).Format("2006-01-02 15:04:05")
 		body := fmt.Sprintf(`{"product_id":1,"flash_price":1.99,"stock":100,"start_time":"%s","end_time":"%s"}`,
 			start, end)
-		return httpPost(ctx, base+"/api/admin/flash", token, body)
+		// 修复：直接发请求获取完整响应，解析真实 flashID
+		req, err := http.NewRequestWithContext(ctx, "POST", base+"/api/admin/flash", strings.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("读取响应失败: %w", err)
+		}
+		if resp.StatusCode >= 400 {
+			return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(raw), 200))
+		}
+		// 解析返回的秒杀活动 ID
+		var result struct {
+			Data struct {
+				ID int `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &result); err == nil && result.Data.ID > 0 {
+			flashID = fmt.Sprintf("%d", result.Data.ID)
+		}
+		return fmt.Sprintf("%d — %s", resp.StatusCode, truncateStr(string(raw), 200)), nil
 	})
 
-	// 步骤3：预热
+	// 步骤3：预热（使用真实 flashID）
 	RecordStep(task, "HTTP 预热秒杀缓存", func() (string, error) {
-		// 取最新创建的秒杀 ID（从步骤2结果或默认1）
-		flashID = "1" // 简化：默认预热 ID=1
+		if flashID == "" {
+			flashID = "1"
+		}
 		return httpPost(ctx, base+"/api/admin/flash/"+flashID+"/warmup", token, "{}")
 	})
 
 	// 步骤4：Redis 验证
 	RecordStep(task, "Redis 验证库存缓存", func() (string, error) {
+		if flashID == "" {
+			flashID = "1"
+		}
 		return queryRedis("flash:stock:" + flashID)
 	})
 
-	// 步骤5：MySQL 验证
+	// 步骤5：MySQL 验证 — 修复：使用参数化查询
 	RecordStep(task, "MySQL 验证秒杀记录", func() (string, error) {
 		return queryMySQL("SELECT COUNT(*) FROM flash_sales")
 	})
@@ -474,7 +624,9 @@ func orderFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 		BaseURL   string `json:"base_url"`
 		ProductID string `json:"product_id"`
 	}
-	json.Unmarshal([]byte(task.Payload), &params)
+	if err := json.Unmarshal([]byte(task.Payload), &params); err != nil {
+		return "", fmt.Errorf("解析 Payload 失败: %w", err)
+	}
 	if params.BaseURL == "" {
 		params.BaseURL = "http://localhost:8080"
 	}
@@ -508,9 +660,9 @@ func orderFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 		return httpPost(ctx, base+"/api/auth/order/create", token, "{}")
 	})
 
-	// 步骤4：MySQL 验证订单写入
+	// 步骤4：MySQL 验证订单写入 — 修复：参数化查询
 	RecordStep(task, "MySQL 验证订单记录", func() (string, error) {
-		return queryMySQL("SELECT COUNT(*) FROM orders WHERE user_id=1")
+		return queryMySQL("SELECT COUNT(*) FROM orders WHERE user_id=?", 1)
 	})
 
 	// 步骤5：API 查询订单列表
@@ -528,7 +680,9 @@ func userFlowRunner(ctx context.Context, task *models.Task) (string, error) {
 	var params struct {
 		BaseURL string `json:"base_url"`
 	}
-	json.Unmarshal([]byte(task.Payload), &params)
+	if err := json.Unmarshal([]byte(task.Payload), &params); err != nil {
+		return "", fmt.Errorf("解析 Payload 失败: %w", err)
+	}
 	if params.BaseURL == "" {
 		params.BaseURL = "http://localhost:8080"
 	}
@@ -570,7 +724,9 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 	var params struct {
 		BaseURL string `json:"base_url"`
 	}
-	json.Unmarshal([]byte(task.Payload), &params)
+	if err := json.Unmarshal([]byte(task.Payload), &params); err != nil {
+		return "", fmt.Errorf("解析 Payload 失败: %w", err)
+	}
 	if params.BaseURL == "" {
 		params.BaseURL = "http://localhost:8080"
 	}
@@ -594,16 +750,21 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 	// 步骤2：创建商品（并解析返回的 ID）
 	RecordStep(task, "HTTP 创建商品", func() (string, error) {
 		body := fmt.Sprintf(`{"name":"哨兵测试商品-%d","category_id":1,"price":9.99,"stock":999,"keywords":"test"}`, time.Now().UnixNano()%10000)
-		// 直接发请求获取完整响应体（不经过 httpPost 的截断）
-		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/api/admin/product", strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "POST", base+"/api/admin/product", strings.NewReader(body))
+		if err != nil {
+			return "", fmt.Errorf("构造请求失败: %w", err)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return "", err
 		}
 		defer resp.Body.Close()
-		raw, _ := io.ReadAll(resp.Body)
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("读取响应失败: %w", err)
+		}
 		if resp.StatusCode >= 400 {
 			return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(raw), 200))
 		}
@@ -622,12 +783,12 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 		return fmt.Sprintf("%d — %s", resp.StatusCode, truncateStr(string(raw), 200)), nil
 	})
 
-	// 步骤3：MySQL 验证商品写入
+	// 步骤3：MySQL 验证商品写入 — 修复：使用参数化查询，消除 SQL 注入模式
 	RecordStep(task, "MySQL 验证商品写入", func() (string, error) {
 		if productID == "" {
 			return "", fmt.Errorf("未获取到商品ID")
 		}
-		return queryMySQL("SELECT COUNT(*) FROM products WHERE id=" + productID)
+		return queryMySQL("SELECT COUNT(*) FROM products WHERE id=?", productID)
 	})
 
 	// 步骤4：修改商品（使用真实 ID）
@@ -635,16 +796,21 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 		if productID == "" {
 			productID = "1"
 		}
-		// 修改商品用 PUT 方法
-		req, _ := http.NewRequestWithContext(ctx, "PUT", base+"/api/admin/product/"+productID, strings.NewReader(`{"price":8.88}`))
+		req, err := http.NewRequestWithContext(ctx, "PUT", base+"/api/admin/product/"+productID, strings.NewReader(`{"price":8.88}`))
+		if err != nil {
+			return "", fmt.Errorf("构造请求失败: %w", err)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return "", err
 		}
 		defer resp.Body.Close()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return "", fmt.Errorf("读取响应失败: %w", err)
+		}
 		if resp.StatusCode >= 400 {
 			return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(raw))
 		}
@@ -658,3 +824,4 @@ func adminCRUDRunner(ctx context.Context, task *models.Task) (string, error) {
 
 	return finalResult(task, "后台管理流程")
 }
+

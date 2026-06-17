@@ -4,6 +4,7 @@ package api
 
 import (
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -42,8 +43,16 @@ func RecoveryMiddleware() gin.HandlerFunc {
 	}
 }
 
-// APIKey 是简单的 API 鉴权密钥，可通过环境变量覆盖。
-var APIKey = "demo-secret-key"
+// APIKey 是简单的 API 鉴权密钥，通过环境变量 API_KEY 设置。
+// 修复：不再硬编码默认值，开发环境可设置 API_KEY=demo-secret-key。
+var APIKey = func() string {
+	if key := os.Getenv("API_KEY"); key != "" {
+		return key
+	}
+	// 默认空密钥 = 跳过鉴权（仅开发环境安全）
+	log.Println("[安全] API_KEY 环境变量未设置，鉴权已禁用（仅用于开发环境）")
+	return ""
+}()
 
 // AuthMiddleware 基于 X-API-Key 请求头的简单鉴权。
 // 如果 APIKey 为空则跳过鉴权（开发模式）。
@@ -54,11 +63,17 @@ func AuthMiddleware() gin.HandlerFunc {
 		method := c.Request.Method
 		if path == "/api/health" || path == "/api/stats" || path == "/api/task-types" || path == "/api/error-log" ||
 			path == "/swagger" || path == "/swagger.json" ||
-			path == "/" || path == "/index.html" || len(path) >= 5 && path[:5] == "/docs" {
+			path == "/" || path == "/index.html" ||
+			strings.HasPrefix(path, "/docs/") || path == "/docs" {
 			c.Next()
 			return
 		}
-		if len(path) >= 7 && path[:7] == "/static" {
+		if strings.HasPrefix(path, "/static") {
+			c.Next()
+			return
+		}
+		// WebSocket 端点单独放行（连接在 Upgrade 时有来源校验）
+		if path == "/ws" {
 			c.Next()
 			return
 		}
@@ -75,10 +90,8 @@ func AuthMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		// 修复：仅通过 X-API-Key 请求头鉴权，移除查询参数方式
 		key := c.GetHeader("X-API-Key")
-		if key == "" {
-			key = c.Query("api_key")
-		}
 		if key != APIKey {
 			c.JSON(401, gin.H{"error": "未授权：缺少有效的 API Key"})
 			c.Abort()
@@ -93,7 +106,8 @@ func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// 修复：CORS 允许的头与鉴权头一致
+		c.Header("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)

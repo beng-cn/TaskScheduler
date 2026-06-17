@@ -9,6 +9,7 @@ import (
 	"task-scheduler/models"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -36,11 +37,13 @@ func NewMySQLStore(dsn string) (*MySQLStore, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := db.Ping(); err != nil {
+		db.Close() // 修复：Ping 失败时必须关闭连接池，避免泄漏
 		return nil, fmt.Errorf("mysql: Ping 失败: %w", err)
 	}
 
 	store := &MySQLStore{db: db}
 	if err := store.autoMigrate(); err != nil {
+		db.Close() // 修复：建表失败时也关闭连接
 		return nil, fmt.Errorf("mysql: 建表失败: %w", err)
 	}
 
@@ -51,25 +54,27 @@ func NewMySQLStore(dsn string) (*MySQLStore, error) {
 func (m *MySQLStore) autoMigrate() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS tasks (
-			id           VARCHAR(64)   NOT NULL PRIMARY KEY,
-			name         VARCHAR(255)  NOT NULL,
-			type         VARCHAR(50)   NOT NULL,
-			payload      TEXT,
-			status       VARCHAR(20)   NOT NULL DEFAULT 'pending',
-			priority     INT           NOT NULL DEFAULT 0,
-			retries      INT           NOT NULL DEFAULT 0,
-			max_retries  INT           NOT NULL DEFAULT 3,
-			timeout       BIGINT        NOT NULL DEFAULT 30,
-			max_latency_ms BIGINT      NOT NULL DEFAULT 0,
-			repeat_sec    BIGINT        NOT NULL DEFAULT 0,
-			scheduled_at DATETIME      NULL,
-			started_at   DATETIME      NULL,
-			finished_at  DATETIME      NULL,
-			result       TEXT,
-			error        TEXT,
-			created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			id             VARCHAR(64)   NOT NULL PRIMARY KEY,
+			name           VARCHAR(255)  NOT NULL,
+			type           VARCHAR(50)   NOT NULL,
+			payload        TEXT,
+			status         VARCHAR(20)   NOT NULL DEFAULT 'pending',
+			priority       INT           NOT NULL DEFAULT 0,
+			retries        INT           NOT NULL DEFAULT 0,
+			max_retries    INT           NOT NULL DEFAULT 3,
+			timeout        BIGINT        NOT NULL DEFAULT 30,
+			max_latency_ms BIGINT        NOT NULL DEFAULT 0,
+			repeat_sec     BIGINT        NOT NULL DEFAULT 0,
+			scheduled_at   DATETIME      NULL,
+			started_at     DATETIME      NULL,
+			finished_at    DATETIME      NULL,
+			result         TEXT,
+			error          TEXT,
+			steps          TEXT,         -- 修复：补充 steps 列（子步骤 JSON）
+			created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			INDEX idx_status (status),
+			INDEX idx_type (type),
 			INDEX idx_scheduled (status, scheduled_at),
 			INDEX idx_created (created_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
@@ -96,15 +101,19 @@ func (m *MySQLStore) CreateTask(ctx context.Context, task *models.Task) error {
 	if task.Status == "" {
 		task.Status = models.StatusPending
 	}
-	// 自动生成 ID（格式: task-{纳秒时间戳}，避免并发冲突）
+	// 自动生成 ID（格式: task-{毫秒时间戳}-{自增序号}，避免并发冲突）
 	if task.ID == "" {
 		task.ID = fmt.Sprintf("task-%d-%d", time.Now().UnixMilli(), m.nextSeq())
 	}
 
-	stepsJSON, _ := json.Marshal(task.Steps)
-	_, err := m.db.ExecContext(ctx,
+	stepsJSON, err := json.Marshal(task.Steps)
+	if err != nil {
+		return fmt.Errorf("mysql: 序列化 Steps 失败: %w", err)
+	}
+	// 修复：INSERT 19 列，19 个占位符（+max_latency_ms?、+steps?, 保持列数与 ? 一致）
+	_, err = m.db.ExecContext(ctx,
 		`INSERT INTO tasks (id, name, type, payload, status, priority, retries, max_retries, timeout, max_latency_ms, repeat_sec, scheduled_at, started_at, finished_at, result, error, steps, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Type, task.Payload, task.Status, task.Priority,
 		task.Retries, task.MaxRetries, task.Timeout, task.MaxLatencyMs, task.RepeatSec,
 		nullTime(task.ScheduledAt), nullTimePtr(task.StartedAt), nullTimePtr(task.FinishedAt),
@@ -149,10 +158,14 @@ func (m *MySQLStore) ListPendingTasks(ctx context.Context) ([]*models.Task, erro
 
 func (m *MySQLStore) UpdateTask(ctx context.Context, task *models.Task) error {
 	task.UpdatedAt = time.Now()
-	stepsJSON, _ := json.Marshal(task.Steps)
-	_, err := m.db.ExecContext(ctx,
+	stepsJSON, err := json.Marshal(task.Steps)
+	if err != nil {
+		return fmt.Errorf("mysql: 序列化 Steps 失败: %w", err)
+	}
+	// 修复：SET 子句补充 max_latency_ms=？，使 17 个 ? 全部匹配
+	_, err = m.db.ExecContext(ctx,
 		`UPDATE tasks SET name=?, type=?, payload=?, status=?, priority=?, retries=?, max_retries=?,
-		 timeout=?, repeat_sec=?, scheduled_at=?, started_at=?, finished_at=?, result=?, error=?, steps=?, updated_at=?
+		 timeout=?, max_latency_ms=?, repeat_sec=?, scheduled_at=?, started_at=?, finished_at=?, result=?, error=?, steps=?, updated_at=?
 		 WHERE id=?`,
 		task.Name, task.Type, task.Payload, task.Status, task.Priority,
 		task.Retries, task.MaxRetries, task.Timeout, task.MaxLatencyMs, task.RepeatSec,
@@ -170,16 +183,22 @@ func (m *MySQLStore) DeleteTask(ctx context.Context, id string) error {
 // --- 分布式锁实现 ---
 
 func (m *MySQLStore) TryLock(ctx context.Context, key string, ttl int64) (bool, error) {
+	if ttl <= 0 {
+		return false, fmt.Errorf("mysql: ttl 必须为正数，当前值: %d", ttl)
+	}
 	now := time.Now().UnixMilli()
-	// 先清理过期锁
-	m.db.ExecContext(ctx, `DELETE FROM locks WHERE lock_key = ? AND expiry < ?`, key, now)
+	// 先清理过期锁（此步骤失败不中断，继续尝试获取锁）
+	_, _ = m.db.ExecContext(ctx, `DELETE FROM locks WHERE lock_key = ? AND expiry < ?`, key, now)
 	// 尝试插入
 	_, err := m.db.ExecContext(ctx,
 		`INSERT INTO locks (lock_key, expiry) VALUES (?, ?)`,
 		key, now+ttl*1000)
 	if err != nil {
-		// 插入失败说明锁已存在
-		return false, nil
+		// 修复：区分"锁已被持有"(Duplicate Key)和真正的数据库错误
+		if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1062 {
+			return false, nil // 锁已存在，正常返回
+		}
+		return false, err // 真正的数据库错误，上报
 	}
 	return true, nil
 }
@@ -211,7 +230,10 @@ func scanTask(scanner interface {
 		return nil, err
 	}
 	if stepsJSON.Valid && stepsJSON.String != "" {
-		json.Unmarshal([]byte(stepsJSON.String), &t.Steps)
+		if err := json.Unmarshal([]byte(stepsJSON.String), &t.Steps); err != nil {
+			// 修复：反序列化失败时降级处理，记录空 Steps，不中断整个查询
+			t.Steps = nil
+		}
 	}
 	if scheduledAt.Valid {
 		t.ScheduledAt = scheduledAt.Time

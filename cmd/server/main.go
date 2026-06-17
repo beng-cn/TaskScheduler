@@ -57,27 +57,27 @@ func main() {
 		}
 		taskStore = mysqlStore
 		log.Println("[启动] 使用 MySQL 存储（任务持久化，重启不丢失）")
-		case "redis":
-			redisStore, err := store.NewRedisStore("127.0.0.1:6379", "", 0)
-			if err != nil {
-				log.Fatalf("[启动] Redis 连接失败: %v", err)
-			}
-			taskStore = redisStore
-			log.Println("[启动] 使用 Redis 存储（高性能缓存 + RDB/AOF 持久化）")
+	case "redis":
+		// 修复：使用配置文件中的 DSN 而非硬编码 127.0.0.1:6379
+		redisAddr := cfg.Store.DSN
+		if redisAddr == "" {
+			redisAddr = "127.0.0.1:6379"
+		}
+		redisStore, err := store.NewRedisStore(redisAddr, "", 0)
+		if err != nil {
+			log.Fatalf("[启动] Redis 连接失败: %v", err)
+		}
+		taskStore = redisStore
+		log.Println("[启动] 使用 Redis 存储（高性能缓存 + RDB/AOF 持久化）")
 	default:
 		taskStore = store.NewMemoryStore()
 		log.Println("[启动] 使用内存存储（进程重启后数据会丢失）")
 	}
 
 	// 注入 MySQL/Redis 连接（供多步验证 runner 使用，通过环境变量配置）
+	// 修复：不再硬编码默认密码，未配置时留空
 	mysqlConn := os.Getenv("MYSQL_DSN")
-	if mysqlConn == "" {
-		mysqlConn = "root:password@tcp(127.0.0.1:3306)/Online_Shopping_System" // 默认值，可覆盖
-	}
 	redisConn := os.Getenv("REDIS_ADDR")
-	if redisConn == "" {
-		redisConn = "127.0.0.1:6379"
-	}
 	worker.SetDBConnectors(mysqlConn, redisConn)
 
 	// 注入清理函数：data_clean 任务通过此回调访问存储层
@@ -86,7 +86,7 @@ func main() {
 		if err != nil {
 			return 0, err
 		}
-		cutoff := time.Now().Add(-10 * time.Minute) // 清理 30 秒前完成的任务（演示用）
+		cutoff := time.Now().Add(-10 * time.Minute) // 清理 10 分钟前完成的任务（演示用）
 		deleted := 0
 		for _, t := range tasks {
 			if t.Status == models.StatusDone && t.FinishedAt != nil && t.FinishedAt.Before(cutoff) {
@@ -106,10 +106,11 @@ func main() {
 
 	// 配置飞书告警 Webhook
 	feishuHook := os.Getenv("FEISHU_WEBHOOK")
-	if feishuHook == "" {
-		feishuHook = "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_KEY_HERE"
+	if feishuHook != "" {
+		notify.SetWebhook(feishuHook)
+	} else {
+		log.Println("[启动] 飞书 Webhook 未配置，告警功能已禁用")
 	}
-	notify.SetWebhook(feishuHook)
 	// 初始化错误日志文件（超过 7 天自动清理）
 	notify.InitErrorLog("logs/error.log")
 
@@ -121,8 +122,8 @@ func main() {
 		// 失败告警：任务失败或超时时写入错误日志 + 推送飞书通知
 		if task.Status == scheduler.StatusFailed || task.Status == scheduler.StatusTimeout {
 			notify.LogTaskError(task)
-			notify.RecordFailure(task.Name)
-			notify.LogEscalation(task.Name, notify.GetFailCount(task.Name))
+			level := notify.RecordFailure(task.Name)
+			notify.LogEscalation(task.Name, level) // 修复：传入 AlertLevel 而非 count
 			if err := notify.SendTaskAlert(task); err != nil {
 				log.Printf("[告警] 飞书推送失败: %v", err)
 			} else {
@@ -142,7 +143,9 @@ func main() {
 			clone.Result = ""
 			clone.Error = ""
 			// 删除旧的循环任务实例，避免无限累积
-			_ = taskStore.DeleteTask(ctx, task.ID)
+			if err := taskStore.DeleteTask(ctx, task.ID); err != nil {
+				log.Printf("[循环] 删除旧实例 %s 失败: %v", task.ID, err)
+			}
 			if err := sched.Submit(clone); err != nil {
 				log.Printf("[循环] 重新创建任务「%s」失败: %v", task.Name, err)
 			} else {
@@ -163,7 +166,8 @@ func main() {
 	}
 
 	// --- 5. 预先创建几个演示任务 ---
-	tasksPath := "tasks.json"; loadTasksFromFile(sched, tasksPath)
+	tasksPath := "tasks.json"
+	loadTasksFromFile(sched, tasksPath)
 
 	// --- 6. 启动调度器 ---
 	sched.Start()
@@ -195,7 +199,18 @@ func main() {
 	log.Println("[HTTP] 服务已停止")
 
 	// 9b. 停止调度器（等待所有任务完成）
-	sched.Stop()
+	// 修复：使用带超时的 goroutine，避免 hang
+	done := make(chan struct{})
+	go func() {
+		sched.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Println("[Scheduler] 正常退出")
+	case <-time.After(30 * time.Second):
+		log.Println("[Scheduler] 退出超时（30秒），强制终止")
+	}
 
 	log.Println("═══════════════════════════════════════════")
 	log.Println("  调度系统已安全退出，再见！")
@@ -205,15 +220,15 @@ func main() {
 // taskFileConfig JSON 任务配置文件的格式。
 type taskFileConfig struct {
 	Tasks []struct {
-		Name       string `json:"name"`
-		Type       string `json:"type"`
-		Payload    string `json:"payload"`
-		MaxRetries int    `json:"max_retries"`
+		Name         string `json:"name"`
+		Type         string `json:"type"`
+		Payload      string `json:"payload"`
+		MaxRetries   int    `json:"max_retries"`
 		Timeout      int64  `json:"timeout"`
-			MaxLatencyMs int64  `json:"max_latency_ms"`
-		RepeatSec  int64  `json:"repeat_sec"`
-		Delay      int64  `json:"delay"`
-		Priority   int    `json:"priority"`
+		MaxLatencyMs int64  `json:"max_latency_ms"`
+		RepeatSec    int64  `json:"repeat_sec"`
+		Delay        int64  `json:"delay"`
+		Priority     int    `json:"priority"`
 	} `json:"tasks"`
 }
 
@@ -234,15 +249,15 @@ func loadTasksFromFile(sched *scheduler.Scheduler, path string) {
 
 	for _, t := range cfg.Tasks {
 		task := &scheduler.Task{
-			Name:        t.Name,
-			Type:        t.Type,
-			Payload:     t.Payload,
-			MaxRetries:  t.MaxRetries,
-			Timeout:     t.Timeout,
-			RepeatSec:   t.RepeatSec,
+			Name:         t.Name,
+			Type:         t.Type,
+			Payload:      t.Payload,
+			MaxRetries:   t.MaxRetries,
+			Timeout:      t.Timeout,
+			RepeatSec:    t.RepeatSec,
 			MaxLatencyMs: t.MaxLatencyMs,
-			Priority:    t.Priority,
-			ScheduledAt: time.Now().Add(time.Duration(t.Delay) * time.Second),
+			Priority:     t.Priority,
+			ScheduledAt:  time.Now().Add(time.Duration(t.Delay) * time.Second),
 		}
 		if err := sched.Submit(task); err != nil {
 			log.Printf("[TaskFile] 创建任务 %s 失败: %v", t.Name, err)

@@ -9,9 +9,13 @@ import (
 	"net/http"
 	"strings"
 	"task-scheduler/models"
+	"time"
 )
 
 var webhookURL string
+
+// 修复：使用带超时的 HTTP 客户端
+var feishuHTTP = &http.Client{Timeout: 10 * time.Second}
 
 // SetWebhook 设置飞书机器人的 Webhook 地址。
 func SetWebhook(url string) {
@@ -65,18 +69,22 @@ func SendTaskAlert(task *models.Task) error {
 			if s.Error != "" {
 				detail = s.Error
 			}
-			if len(detail) > 100 {
-				detail = detail[:100] + "..."
+			// 修复：按 rune 截断，避免拆分多字节 UTF-8 字符
+			if len([]rune(detail)) > 100 {
+				runes := []rune(detail)
+				detail = string(runes[:100]) + "..."
 			}
 			sb.WriteString(fmt.Sprintf("%s %s（%dms）: %s\n", icon, s.Name, s.DurationMs, detail))
 		}
 	}
 
-	// Payload
-	if len(task.Payload) > 300 {
-		task.Payload = task.Payload[:300] + "..."
+	// Payload — 修复：不修改原始 task.Payload（避免副作用），使用局部副本
+	payload := task.Payload
+	if len([]rune(payload)) > 300 {
+		runes := []rune(payload)
+		payload = string(runes[:300]) + "..."
 	}
-	sb.WriteString(fmt.Sprintf("\n**Payload**：%s\n", task.Payload))
+	sb.WriteString(fmt.Sprintf("\n**Payload**：%s\n", payload))
 	sb.WriteString(fmt.Sprintf("\n📋 完整报告: http://localhost:8888/?task=%s", task.ID))
 
 	// 发送卡片
@@ -98,8 +106,12 @@ func SendTaskAlert(task *models.Task) error {
 			},
 		},
 	}
-	body, _ := json.Marshal(card)
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewReader(body))
+	body, err := json.Marshal(card)
+	if err != nil {
+		return fmt.Errorf("feishu: 序列化卡片失败: %w", err)
+	}
+	// 修复：使用带超时的 HTTP 客户端
+	resp, err := feishuHTTP.Post(webhookURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("feishu: 发送失败: %w", err)
 	}

@@ -24,13 +24,13 @@ func NewHandler(sched *scheduler.Scheduler) *Handler {
 // --- 请求/响应结构体 ---
 
 type CreateTaskRequest struct {
-	Name        string `json:"name" binding:"required"`    // 任务名称（必填）
-	Type        string `json:"type" binding:"required"`    // 任务类型（必填）
-	Payload     string `json:"payload"`                    // 任务负载
-	Priority    int    `json:"priority"`                   // 优先级
-	MaxRetries  int    `json:"max_retries"`                // 最大重试次数
-	Timeout     int64  `json:"timeout"`                    // 超时时间（秒）
-	Delay       int64  `json:"delay"`                      // 延迟执行（秒）
+	Name       string `json:"name" binding:"required"` // 任务名称（必填）
+	Type       string `json:"type" binding:"required"` // 任务类型（必填）
+	Payload    string `json:"payload"`                 // 任务负载
+	Priority   int    `json:"priority"`                // 优先级
+	MaxRetries int    `json:"max_retries"`             // 最大重试次数
+	Timeout    int64  `json:"timeout"`                 // 超时时间（秒）
+	Delay      int64  `json:"delay"`                   // 延迟执行（秒）
 }
 
 // CreateTask 创建新任务。
@@ -39,6 +39,33 @@ func (h *Handler) CreateTask(c *gin.Context) {
 	var req CreateTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数校验失败: " + err.Error()})
+		return
+	}
+
+	// 修复：校验数值字段的合法性
+	if req.Delay < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "delay 不能为负数"})
+		return
+	}
+	if req.Priority < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "priority 不能为负数"})
+		return
+	}
+	if req.MaxRetries < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_retries 不能为负数"})
+		return
+	}
+	if req.Timeout < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timeout 不能为负数"})
+		return
+	}
+	// 修复：防止 delay 和 timeout 溢出
+	if req.Delay > 31536000 { // 超过一年
+		c.JSON(http.StatusBadRequest, gin.H{"error": "delay 值过大"})
+		return
+	}
+	if req.Timeout > 86400 { // 超过一天
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timeout 值过大"})
 		return
 	}
 
@@ -65,7 +92,7 @@ func (h *Handler) CreateTask(c *gin.Context) {
 	if runner := worker.GetRunner(task.Type); runner == nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":          "不支持的任务类型: " + task.Type,
-			"supported_types": supportedTypes(),
+			"supported_types": worker.RegisteredTypes(), // 修复：动态获取支持类型
 		})
 		return
 	}
@@ -102,15 +129,16 @@ func (h *Handler) ListTasks(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询任务失败: " + err.Error()})
 		return
 	}
-	filtered := make([]*scheduler.Task, 0, len(tasks))
+	// 修复：空 Namespace 与 "default" 分离，不混淆
+	var filtered []*scheduler.Task
 	for _, t := range tasks {
-		if ns == "" || t.Namespace == ns || (ns == "default" && t.Namespace == "") {
+		if ns == "" || t.Namespace == ns {
 			filtered = append(filtered, t)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"tasks":    filtered,
-		"total":    len(filtered),
+		"tasks":     filtered,
+		"total":     len(filtered),
 		"namespace": ns,
 	})
 }
@@ -137,7 +165,7 @@ func (h *Handler) GetStats(c *gin.Context) {
 // GET /api/task-types
 func (h *Handler) GetTaskTypes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"types": supportedTypes(),
+		"types": worker.RegisteredTypes(), // 修复：动态获取而非硬编码
 	})
 }
 
@@ -163,9 +191,4 @@ func (h *Handler) ErrorLog(c *gin.Context) {
 		entries = []notify.ErrorEntry{}
 	}
 	c.JSON(http.StatusOK, gin.H{"total": len(entries), "entries": entries})
-}
-
-// supportedTypes 返回当前注册的所有任务类型。
-func supportedTypes() []string {
-	return []string{"http_call", "data_clean", "flash_warmup", "cart_flow", "flash_full_check", "order_flow", "user_flow", "admin_crud"}
 }

@@ -15,41 +15,48 @@ const (
 )
 
 var (
-	failCounts sync.Map                                    // taskName → consecutive fails
-	escalationFuncs = map[AlertLevel]func(string){}        // 不同级别的回调
+	mu         sync.Mutex
+	failCounts = make(map[string]int) // taskName → 连续失败次数（互斥锁保护，消除 data race）
 )
 
 // RecordFailure 记录一次失败，返回当前告警级别。
 func RecordFailure(taskName string) AlertLevel {
-	val, _ := failCounts.LoadOrStore(taskName, new(int))
-	count := val.(*int)
-	*count++
-	n := *count
+	mu.Lock()
+	failCounts[taskName]++
+	n := failCounts[taskName]
+	mu.Unlock()
 	switch {
-	case n >= 5: return LevelUrgent
-	case n >= 3: return LevelCritical
-	default: return LevelWarning
+	case n >= 5:
+		return LevelUrgent
+	case n >= 3:
+		return LevelCritical
+	default:
+		return LevelWarning
 	}
 }
 
 // ResetEscalation 任务成功后重置告警计数。
 func ResetEscalation(taskName string) {
-	failCounts.Delete(taskName)
+	mu.Lock()
+	delete(failCounts, taskName)
+	mu.Unlock()
 }
 
 // GetFailCount 获取连续失败次数。
 func GetFailCount(taskName string) int {
-	if v, ok := failCounts.Load(taskName); ok {
-		return *(v.(*int))
-	}
-	return 0
+	mu.Lock()
+	defer mu.Unlock()
+	return failCounts[taskName]
 }
 
 // LogEscalation 记录告警升级日志。
-func LogEscalation(taskName string, count int) {
-	if count == 3 {
-		log.Printf("[告警升级] %s 连续失败 %d 次，升级为严重告警", taskName, count)
-	} else if count == 5 {
-		log.Printf("[告警升级] %s 连续失败 %d 次，升级为紧急告警！", taskName, count)
+func LogEscalation(taskName string, level AlertLevel) {
+	switch level {
+	case LevelCritical:
+		log.Printf("[告警升级] %s 连续失败达到阈值，升级为严重告警", taskName)
+	case LevelUrgent:
+		log.Printf("[告警升级] %s 连续失败达到阈值，升级为紧急告警！", taskName)
+	default:
+		// LevelWarning 不单独输出升级日志
 	}
 }

@@ -20,8 +20,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o scheduler cmd/server/m
 # ——— 运行阶段 ———
 FROM alpine:3.20
 
-# 安装 ca 证书（HTTPS 请求需要）
-RUN apk --no-cache add ca-certificates tzdata
+# 安装 ca 证书（HTTPS 请求需要）和 curl（健康检查用）
+RUN apk --no-cache add ca-certificates tzdata curl
 ENV TZ=Asia/Shanghai
 
 WORKDIR /app
@@ -31,11 +31,11 @@ COPY --from=builder /app/scheduler .
 COPY --from=builder /app/web ./web
 COPY --from=builder /app/tasks.json .
 
-# 暴露 HTTP 端口
+# 暴露 HTTP 端口（应用默认监听 8888）
 EXPOSE 8888
 
-# 健康检查
+# 健康检查（使用 curl 替代依赖 busybox-wget）
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD wget -qO- http://localhost:8888/api/health || exit 1
+    CMD curl -sf http://localhost:8888/api/health || exit 1
 
 ENTRYPOINT ["./scheduler"]
