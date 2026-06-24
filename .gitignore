@@ -32,3 +32,9 @@ git-safe-push.sh
 # 临时文件
 tmp/
 temp/
+
+# Swagger 导入目录（项目特定，不同机器不同）
+api test/
+
+# 编辑器备份
+*~

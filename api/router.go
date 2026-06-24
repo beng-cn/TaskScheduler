@@ -10,7 +10,8 @@ import (
 
 // SetupRouter 创建并配置 Gin 路由引擎。
 // 注册所有中间件和 API 路由，同时托管 Web 前端静态文件。
-func SetupRouter(sched *scheduler.Scheduler) *gin.Engine {
+// swaggerReload 是可选的 Swagger 重载回调（由 main 包提供）。
+func SetupRouter(sched *scheduler.Scheduler, swaggerReload func(string) (string, int, error)) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
@@ -22,6 +23,9 @@ func SetupRouter(sched *scheduler.Scheduler) *gin.Engine {
 	router.Use(AuthMiddleware()) // API Key 鉴权
 
 	handler := NewHandler(sched)
+	if swaggerReload != nil {
+		handler.SetSwaggerReload(swaggerReload)
+	}
 
 	// --- API 路由组 ---
 	api := router.Group("/api")
@@ -30,6 +34,7 @@ func SetupRouter(sched *scheduler.Scheduler) *gin.Engine {
 		api.GET("/stats", handler.GetStats)
 		api.GET("/task-types", handler.GetTaskTypes)
 		api.GET("/error-log", handler.ErrorLog)
+		api.GET("/projects", handler.ListProjects)
 
 		tasks := api.Group("/tasks")
 		{
@@ -37,6 +42,11 @@ func SetupRouter(sched *scheduler.Scheduler) *gin.Engine {
 			tasks.GET("", handler.ListTasks)
 			tasks.GET("/:id", handler.GetTask)
 			tasks.DELETE("/:id", handler.DeleteTask)
+		}
+
+		swagger := api.Group("/swagger")
+		{
+			swagger.POST("/reload", handler.SwaggerReload)
 		}
 	}
 

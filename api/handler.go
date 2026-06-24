@@ -1,7 +1,9 @@
 package api
 
 import (
+	"log"
 	"net/http"
+	"strings"
 	"task-scheduler/notify"
 	"task-scheduler/scheduler"
 	"task-scheduler/worker"
@@ -12,12 +14,18 @@ import (
 
 // Handler 是 HTTP 请求处理器。
 type Handler struct {
-	sched *scheduler.Scheduler
+	sched         *scheduler.Scheduler
+	swaggerReload func(path string) (string, int, error) // Swagger 重载回调
 }
 
 // NewHandler 创建新的处理器实例。
 func NewHandler(sched *scheduler.Scheduler) *Handler {
 	return &Handler{sched: sched}
+}
+
+// SetSwaggerReload 注入 Swagger 重载回调函数（由 main 包提供）。
+func (h *Handler) SetSwaggerReload(fn func(path string) (string, int, error)) {
+	h.swaggerReload = fn
 }
 
 // --- 请求/响应结构体 ---
@@ -197,4 +205,84 @@ func (h *Handler) ErrorLog(c *gin.Context) {
 		entries = []notify.ErrorEntry{}
 	}
 	c.JSON(http.StatusOK, gin.H{"total": len(entries), "entries": entries})
+}
+
+// ListProjects 列出所有已导入的项目（不同 namespace）。
+// GET /api/projects
+func (h *Handler) ListProjects(c *gin.Context) {
+	// 用空 namespace 获取全量任务，提取不同的 namespace
+	tasks, err := h.sched.ListTasks("")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询项目列表失败: " + err.Error()})
+		return
+	}
+
+	seen := make(map[string]bool)
+	var projects []string
+	for _, t := range tasks {
+		ns := t.Namespace
+		if ns == "" {
+			ns = "default"
+		}
+		if !seen[ns] {
+			seen[ns] = true
+			projects = append(projects, ns)
+		}
+	}
+	if len(projects) == 0 {
+		projects = append(projects, "default")
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"projects": projects,
+		"total":    len(projects),
+	})
+}
+
+// SwaggerReload 后端扫描固定目录、解析 swagger、创建任务，前端只拿结果。
+// POST /api/swagger/reload
+// 传 {"scan_dir": true} 扫描 D:\DEMO\api test\ 目录
+func (h *Handler) SwaggerReload(c *gin.Context) {
+	if h.swaggerReload == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Swagger 重载功能未配置"})
+		return
+	}
+
+	var req struct {
+		Path    string `json:"path"`
+		ScanDir bool   `json:"scan_dir"`
+	}
+	// 允许空 body（默认扫描目录）
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
+			return
+		}
+	}
+
+	// scan_dir 模式：空 path → 后端扫描目录全部加载
+	targetPath := req.Path
+	if req.ScanDir || targetPath == "" {
+		targetPath = "" // 空 path 触发后端扫描整个目录
+	}
+
+	// 调用重载回调（后端处理一切：扫描、解析、创建任务）
+	result, count, err := h.swaggerReload(targetPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "重载失败: " + err.Error()})
+		return
+	}
+
+	// 多项目以逗号分隔返回
+	projects := strings.Split(result, ",")
+	if result == "" {
+		projects = nil
+	}
+
+	log.Printf("[API] Swagger 重载完成，%d 个项目: %v", count, projects)
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "后端解析完成，项目列表已更新",
+		"projects": projects,
+		"count":    count,
+	})
 }

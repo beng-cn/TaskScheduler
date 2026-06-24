@@ -84,6 +84,7 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		// 只读接口 + 前端页面不鉴权
 		if path == "/api/health" || path == "/api/stats" || path == "/api/task-types" || path == "/api/error-log" ||
+			path == "/api/projects" ||
 			path == "/swagger" || path == "/swagger.json" ||
 			path == "/" || path == "/index.html" ||
 			strings.HasPrefix(path, "/docs/") || path == "/docs" {

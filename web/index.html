@@ -312,9 +312,13 @@
             <a class="btn" href="/swagger" target="_blank" style="text-decoration:none;">📖 API文档</a>
             <a class="btn" href="/api/error-log" target="_blank" style="text-decoration:none;">📋 错误日志</a>
             <button class="btn" onclick="refreshData()">🔄 刷新</button>
-            <label style="margin-left:12px;color:var(--text-muted);font-size:13px;">租户:</label>
-            <input type="text" id="namespace-select" value="default" onchange="onNsChange()"
-                   style="width:100px;padding:6px 10px;background:var(--card-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:13px;" placeholder="default">
+            <button class="btn" id="batch-delete-btn" onclick="batchDelete()" style="display:none;color:var(--red);border-color:var(--red);">🗑 批量删除</button>
+            <label style="margin-left:12px;color:var(--text-muted);font-size:13px;">项目:</label>
+            <select id="project-select" onchange="onProjectChange()"
+                    style="padding:6px 10px;background:var(--card-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:13px;max-width:180px;">
+                <option value="default">default</option>
+            </select>
+            <button class="btn" onclick="importSwagger(this)" title="扫描 D:\DEMO\api test\ 目录重新加载所有项目" style="font-size:12px;">📥 导入项目</button>
             <span style="margin-left:auto;color:var(--text-muted);font-size:13px;" id="last-update"></span>
         </div>
 
@@ -322,6 +326,7 @@
         <table class="task-table">
             <thead>
                 <tr>
+                    <th style="width:24px;"><input type="checkbox" id="select-all" onclick="toggleSelectAll()" title="全选/取消" style="cursor:pointer;"></th>
                     <th style="width:30px;"></th>
                     <th>任务ID</th>
                     <th>名称</th>
@@ -333,7 +338,7 @@
                 </tr>
             </thead>
             <tbody id="task-list">
-                <tr><td colspan="7" style="text-align:center;color:var(--text-muted);">加载中...</td></tr>
+                <tr><td colspan="9" style="text-align:center;color:var(--text-muted);">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -398,10 +403,73 @@
 
         let currentNamespace = 'default';
 
-        function onNsChange() {
-            currentNamespace = document.getElementById('namespace-select').value || 'default';
-            taskCache = {};  // 切换租户时清缓存
+        // 加载项目列表到下拉框
+        function loadProjects() {
+            fetch(API + '/projects', { headers: getNsHeaders() })
+                .then(r => r.json())
+                .then(data => {
+                    var sel = document.getElementById('project-select');
+                    var projects = data.projects || ['default'];
+                    // 如果只有 default 且当前也是 default，保持不动
+                    // 否则自动选中第一个项目
+                    var currentVal = sel.value;
+                    sel.innerHTML = '';
+                    projects.forEach(function(p) {
+                        var opt = document.createElement('option');
+                        opt.value = p;
+                        opt.textContent = p;
+                        sel.appendChild(opt);
+                    });
+                    // 智能选中：优先保持当前值，否则选第一个非 default 项目
+                    if (projects.indexOf(currentVal) >= 0) {
+                        sel.value = currentVal;
+                    } else if (projects.length === 1) {
+                        sel.value = projects[0];
+                    } else {
+                        // 有多个项目时，选第一个非 default 的
+                        var nonDefault = projects.filter(function(p) { return p !== 'default'; });
+                        sel.value = nonDefault.length > 0 ? nonDefault[0] : projects[0];
+                    }
+                    // 同步 currentNamespace
+                    currentNamespace = sel.value;
+                    // 首次加载或项目变化时刷新任务列表
+                    refreshData();
+                })
+                .catch(function(e) { console.error('加载项目列表失败:', e); });
+        }
+
+        function onProjectChange() {
+            currentNamespace = document.getElementById('project-select').value || 'default';
+            taskCache = {};  // 切换项目时清缓存
             refreshData();
+        }
+
+        // 刷新所有项目：后端扫描目录、解析swagger、创建任务，前端只拿结果
+        function importSwagger(btn) {
+            btn.textContent = '⏳ 加载中...';
+            btn.disabled = true;
+            var hdrs = getNsHeaders();
+            hdrs['Content-Type'] = 'application/json';
+            fetch(API + '/swagger/reload', {
+                method: 'POST',
+                headers: hdrs,
+                body: JSON.stringify({scan_dir: true})
+            }).then(function(r) { return r.json(); })
+            .then(function(data) {
+                btn.textContent = '📥 导入项目';
+                btn.disabled = false;
+                if (data.error) {
+                    alert('导入失败: ' + data.error);
+                } else {
+                    alert('✅ ' + data.message + '\n项目: ' + (data.projects || []).join(', ') + '\n任务总数: ' + data.count);
+                    loadProjects();
+                    refreshData();
+                }
+            }).catch(function(e) {
+                btn.textContent = '📥 导入项目';
+                btn.disabled = false;
+                alert('请求失败: ' + e);
+            });
         }
 
         function getNsHeaders() {
@@ -421,9 +489,12 @@
             expandedTaskId = taskFromUrl;
         }
 
-        // 页面加载时首次刷新，然后每2秒自动刷新
-        refreshData();
+        // 页面加载：先加载项目列表（loadProjects 内部会自动触发首次 refreshData）
+        loadProjects();
+        // 每2秒刷新任务列表
         setInterval(refreshData, 2000);
+        // 每10秒刷新项目列表（检测新导入的项目）
+        setInterval(loadProjects, 10000);
 
         function refreshData() {
             fetch(API + '/stats').then(r => r.json()).then(updateStats).catch(console.error);
@@ -444,7 +515,7 @@
             const tasks = data.tasks || [];
             const tbody = document.getElementById('task-list');
             if (tasks.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);">暂无任务</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);">暂无任务</td></tr>';
                 expandedTaskId = null;
                 return;
             }
@@ -460,6 +531,7 @@
                 const statusText = getStatusText(t.status);
                 return `
                 <tr class="task-row" onclick="toggleDetail(this, '${t.id}')" title="点击展开/收起详情">
+                    <td style="text-align:center;"><input type="checkbox" class="task-check" data-id="${t.id}" onclick="event.stopPropagation();onCheckChange()" style="cursor:pointer;"></td>
                     <td><span class="expand-icon">▶</span></td>
                     <td><code>${t.id}</code></td>
                     <td>${escHtml(t.name)}</td>
@@ -470,7 +542,7 @@
                     <td><button class="btn" style="padding:2px 8px;font-size:11px;border-color:var(--red);color:var(--red);" onclick="event.stopPropagation();deleteTask('${t.id}')" title="删除任务">✕</button></td>
                 </tr>
                 <tr class="detail-row" id="detail-${t.id}">
-                    <td colspan="8">${buildDetail(t)}</td>
+                    <td colspan="9">${buildDetail(t)}</td>
                 </tr>
                 `;
             }).join('');
@@ -760,6 +832,32 @@
             }).catch(function() {
                 prompt('手动复制以下报告（Ctrl+C）：', text);
             });
+        }
+
+        function toggleSelectAll() {
+            var checked = document.getElementById('select-all').checked;
+            document.querySelectorAll('.task-check').forEach(function(cb) { cb.checked = checked; });
+            onCheckChange();
+        }
+
+        function onCheckChange() {
+            var count = document.querySelectorAll('.task-check:checked').length;
+            document.getElementById('batch-delete-btn').style.display = count > 0 ? '' : 'none';
+            var total = document.querySelectorAll('.task-check').length;
+            document.getElementById('select-all').checked = total > 0 && count === total;
+        }
+
+        function batchDelete() {
+            var checked = document.querySelectorAll('.task-check:checked');
+            if (checked.length === 0) return;
+            if (!confirm('确认删除选中的 ' + checked.length + ' 个任务？')) return;
+            var promises = [];
+            checked.forEach(function(cb) {
+                promises.push(fetch(API + '/tasks/' + cb.dataset.id, { method: 'DELETE', headers: getNsHeaders() }));
+            });
+            Promise.all(promises).then(function() {
+                refreshData();
+            }).catch(function(e) { alert('批量删除失败: ' + e); });
         }
 
         function deleteTask(id) {

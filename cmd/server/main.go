@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +37,8 @@ func main() {
 
 	// --- 1. 加载配置 ---
 	configPath := flag.String("config", "", "配置文件路径 (JSON格式)")
+	freshFlag := flag.Bool("fresh", false, "启动时清空所有旧任务（干净启动）")
+	swaggerFlag := flag.String("swagger", "", "swagger.json 文件路径（默认扫描 D:\\DEMO\\api test\\ 目录）")
 	flag.Parse()
 
 	cfg, err := config.LoadFromFile(*configPath)
@@ -72,6 +75,18 @@ func main() {
 	default:
 		taskStore = store.NewMemoryStore()
 		log.Println("[启动] 使用内存存储（进程重启后数据会丢失）")
+
+		// -fresh: 清空所有旧任务
+		if *freshFlag {
+			tasks, _ := taskStore.ListTasks(context.Background(), "")
+			deleted := 0
+			for _, t := range tasks {
+				if taskStore.DeleteTask(context.Background(), t.ID) == nil {
+					deleted++
+				}
+			}
+			log.Printf("[Fresh] 已清空 %d 个旧任务，干净启动", deleted)
+		}
 	}
 
 	// 注入 MySQL/Redis 连接（供多步验证 runner 使用，通过环境变量配置）
@@ -154,8 +169,19 @@ func main() {
 		}
 	})
 
-	// --- 4. 初始化 HTTP 路由 ---
-	router := api.SetupRouter(sched)
+	// --- 4. 初始化 HTTP 路由（注入 Swagger 重载回调） ---
+	router := api.SetupRouter(sched, func(path string) (string, int, error) {
+		// 如果 path 为空 → 扫描目录全部重载
+		if path == "" {
+			projects, err := ScanAndLoadSwaggerDir(sched)
+			if err != nil {
+				return "", 0, err
+			}
+			return strings.Join(projects, ","), len(projects), nil
+		}
+		// 否则重载指定文件
+		return ReloadSwaggerProject(sched, path)
+	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{
@@ -165,9 +191,37 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 	}
 
-	// --- 5. 预先创建几个演示任务 ---
-	tasksPath := "tasks.json"
-	loadTasksFromFile(sched, tasksPath)
+	// --- 5. 注入任务查询回调（供 swagger 生成的 DELETE 任务查询父任务结果） ---
+	worker.SetTaskLookup(func(ctx context.Context, taskID string) (*models.Task, error) {
+		t, err := taskStore.GetTask(ctx, taskID)
+		if err != nil {
+			return nil, err
+		}
+		return t, nil
+	})
+
+	// --- 6. 加载 Swagger 文件创建测试项目 ---
+	if *swaggerFlag != "" {
+		// 手动指定路径
+		projectName, count, err := LoadTasksFromSwagger(sched, *swaggerFlag)
+		if err != nil {
+			log.Printf("[启动] 加载 swagger 文件失败: %v", err)
+		} else {
+			log.Printf("[启动] 从 %s 加载项目「%s」，共 %d 个任务", *swaggerFlag, projectName, count)
+		}
+	} else {
+		// 扫描固定目录 D:\DEMO\api test\
+		projects, err := ScanAndLoadSwaggerDir(sched)
+		if err != nil {
+			log.Printf("[启动] 扫描 swagger 目录失败: %v", err)
+		} else if len(projects) > 0 {
+			log.Printf("[启动] 从 swagger 目录加载了 %d 个项目: %v", len(projects), projects)
+		} else {
+			// fallback: 加载传统的 tasks.json
+			tasksPath := "tasks.json"
+			loadTasksFromFile(sched, tasksPath)
+		}
+	}
 
 	// --- 6. 启动调度器 ---
 	sched.Start()
@@ -219,6 +273,10 @@ func main() {
 
 // taskFileConfig JSON 任务配置文件的格式。
 type taskFileConfig struct {
+	Monitored struct {
+		MySQL string `json:"mysql"`
+		Redis string `json:"redis"`
+	} `json:"monitored"`
 	Tasks []struct {
 		Name         string `json:"name"`
 		Type         string `json:"type"`
@@ -233,11 +291,11 @@ type taskFileConfig struct {
 }
 
 // loadTasksFromFile 从 JSON 文件加载任务定义并批量创建。
-// 换项目只需准备一个新的 tasks.json 即可，无需改代码。
+// 同时从 monitored 段读取被监控系统的 MySQL/Redis 连接配置（fallback 环境变量）。
 func loadTasksFromFile(sched *scheduler.Scheduler, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("[TaskFile] 任务配置文件 %s 不存在，跳过（可指定 -tasks 参数）", path)
+		log.Printf("[TaskFile] 任务配置文件 %s 不存在，跳过", path)
 		return
 	}
 
@@ -246,6 +304,19 @@ func loadTasksFromFile(sched *scheduler.Scheduler, path string) {
 		log.Printf("[TaskFile] 解析 %s 失败: %v", path, err)
 		return
 	}
+
+	// 从 tasks.json 的 monitored 段读取被监控系统的连接配置（环境变量优先）
+	mysqlDSN := os.Getenv("MYSQL_DSN")
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if mysqlDSN == "" && cfg.Monitored.MySQL != "" {
+		mysqlDSN = cfg.Monitored.MySQL
+		log.Printf("[TaskFile] 使用文件配置的 MySQL")
+	}
+	if redisAddr == "" && cfg.Monitored.Redis != "" {
+		redisAddr = cfg.Monitored.Redis
+		log.Printf("[TaskFile] 使用文件配置的 Redis")
+	}
+	worker.SetDBConnectors(mysqlDSN, redisAddr)
 
 	for _, t := range cfg.Tasks {
 		task := &scheduler.Task{
